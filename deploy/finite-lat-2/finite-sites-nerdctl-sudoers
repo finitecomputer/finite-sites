@@ -1,0 +1,9 @@
+# Install as /etc/sudoers.d/finite-sites-nerdctl (mode 0440).
+# The Kata app runner drives containerd through nerdctl, whose CNI bridge
+# setup needs CAP_NET_ADMIN. The daemon (user finite-sites) constructs every
+# argv; the only tenant-controlled value is the validated start command,
+# passed as one argv element into the guest shell. Using the Kata runner
+# requires removing NoNewPrivileges from finite-saas-sites.service so sudo
+# can run (see deploy doc); tenant isolation then lives at the microVM
+# boundary, which is stronger than the daemon-side sandbox it replaces.
+finite-sites ALL=(root) NOPASSWD: /usr/local/bin/nerdctl

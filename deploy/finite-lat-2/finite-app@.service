@@ -1,0 +1,37 @@
+# Template unit for tier-2 Finite Sites apps. One instance per app site:
+#   finite-app@{site_id}.service
+# finitesitesd writes /var/lib/finite-sites/apps/{site_id}/{current,app.env}
+# and restarts the instance through bounded sudo (see finite-sites-sudoers).
+#
+# Isolation posture (v0, ADR-0014): unprivileged dynamic user, read-only
+# code, one private writable state directory, resource caps. Not a microVM;
+# the allowlist is the trust boundary until the MicroSandbox upgrade.
+
+[Unit]
+Description=Finite Sites app %i
+After=network-online.target
+
+[Service]
+DynamicUser=yes
+EnvironmentFile=/var/lib/finite-sites/apps/%i/app.env
+WorkingDirectory=/var/lib/finite-sites/apps/%i/current
+ExecStart=/bin/sh -c "exec ${FINITE_APP_START}"
+Restart=on-failure
+RestartSec=2
+
+# The app's only writable path: /var/lib/finite-app/%i (HOME and DATA_DIR
+# in app.env point here). DynamicUser already implies ProtectSystem=strict
+# and ProtectHome=read-only; these are explicit for review.
+StateDirectory=finite-app/%i
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+# Resource caps: one app cannot starve the box.
+MemoryMax=1G
+CPUQuota=200%
+TasksMax=256

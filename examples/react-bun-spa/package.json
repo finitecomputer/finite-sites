@@ -1,0 +1,13 @@
+{
+  "name": "react-bun-spa",
+  "private": true,
+  "scripts": {
+    "build": "bun build index.html --outdir=dist --minify",
+    "dev": "bun index.html"
+  },
+  "dependencies": {
+    "react": "^19",
+    "react-dom": "^19",
+    "react-router-dom": "^7"
+  }
+}

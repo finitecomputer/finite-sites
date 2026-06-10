@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>finite spa demo</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0b0b0f; color: #e8e8ee;
+           display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    main { max-width: 28rem; padding: 2rem; text-align: center; }
+    nav { display: flex; gap: 1rem; justify-content: center; margin-bottom: 2rem; }
+    a { color: #8b8bf0; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .route { font-size: 1.4rem; margin-bottom: 0.5rem; }
+    .hint { color: #9a9aa8; font-size: 0.9rem; line-height: 1.5; }
+    code { background: #16161d; padding: 0.1rem 0.4rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <main>
+    <nav>
+      <a href="/" data-link>home</a>
+      <a href="/about" data-link>about</a>
+      <a href="/deep/nested/route" data-link>deep route</a>
+    </nav>
+    <div class="route" id="route"></div>
+    <p class="hint">
+      This is a single-page app with history-API routing, published with
+      <code>fsite publish --spa</code>. Navigation never reloads the page,
+      and refreshing on any route serves the app shell instead of a 404.
+      Try hitting refresh right now.
+    </p>
+  </main>
+  <script src="/assets/router.js"></script>
+</body>
+</html>

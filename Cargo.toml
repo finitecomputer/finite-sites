@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/finitesites-proto",
+  "crates/finitesites-blob",
+  "crates/finitesites-store",
+  "crates/finitesites-engine",
+  "crates/finitesitesd",
+  "crates/fsite-cli",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/finitecomputer/finite-sites"
+rust-version = "1.88"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hmac = "0.12"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+tempfile = "3"
+secp256k1 = { version = "0.29.1", default-features = false, features = ["std"] }
+base64 = "0.22"
+bech32 = "0.11"
+getrandom = "0.3"
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal"] }
+tower = { version = "0.5", features = ["util"] }
+ureq = { version = "2.10", features = ["json"] }
+tar = "0.4"
+flate2 = "1"
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"

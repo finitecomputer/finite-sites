@@ -1,0 +1,826 @@
+use sha2::{Digest, Sha256};
+
+use finitesites_blob::BlobStore;
+use finitesites_proto::dto::SharingRequest;
+use finitesites_proto::limits::{
+    LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
+};
+use finitesites_proto::{ManifestFile, PublishManifest, hex};
+use finitesites_store::{SiteStatus, Store, Visibility};
+
+use crate::{Engine, EngineConfig, EngineError, ViewAccess};
+
+const OWNER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const OTHER_OWNER: &str = "9999999999999999999999999999999999999999999999999999999999999999";
+const SITE_KEY: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+const OTHER_SITE_KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+const NOW: u64 = 1_750_000_000;
+
+struct Fixture {
+    engine: Engine,
+    _blob_dir: tempfile::TempDir,
+}
+
+fn fixture() -> Fixture {
+    let blob_dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in_memory().unwrap();
+    let blobs = BlobStore::open(blob_dir.path()).unwrap();
+    let config = EngineConfig {
+        base_domain: "sites.test".into(),
+        site_url_scheme: "http".into(),
+        site_url_port: None,
+    };
+    let mut engine = Engine::new(store, blobs, [42u8; 32], config);
+    engine
+        .store_mut()
+        .allow_pubkey(OWNER, "test owner", NOW)
+        .unwrap();
+    Fixture {
+        engine,
+        _blob_dir: blob_dir,
+    }
+}
+
+fn sha(bytes: &[u8]) -> String {
+    hex::encode(&Sha256::digest(bytes))
+}
+
+fn manifest_for(entries: &[(&str, &[u8])]) -> PublishManifest {
+    PublishManifest {
+        files: entries
+            .iter()
+            .map(|(path, bytes)| ManifestFile {
+                path: (*path).to_string(),
+                sha256: sha(bytes),
+                size: bytes.len() as u64,
+            })
+            .collect(),
+    }
+}
+
+/// Claim + publish a two-file site, returning the publish outcome.
+fn publish_site(engine: &mut Engine, name: &str, site_key: &str) -> crate::FinalizeOutcome {
+    engine.claim(OWNER, name, site_key, NOW).unwrap();
+    let index: &[u8] = b"<h1>hello</h1>";
+    let style: &[u8] = b"body { color: red }";
+    let manifest = manifest_for(&[("/index.html", index), ("/css/style.css", style)]);
+    let begun = engine
+        .begin_publish(site_key, &manifest, false, None, NOW)
+        .unwrap();
+    engine
+        .upload_blob(site_key, &begun.publish_id, &sha(index), index, NOW)
+        .unwrap();
+    engine
+        .upload_blob(site_key, &begun.publish_id, &sha(style), style, NOW)
+        .unwrap();
+    engine
+        .finalize_publish(site_key, &begun.publish_id, NOW)
+        .unwrap()
+}
+
+// ---- claim ----------------------------------------------------------------
+
+#[test]
+fn claim_succeeds_and_replays_idempotently() {
+    let mut fx = fixture();
+    let first = fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    assert!(!first.already_claimed);
+    assert_eq!(first.url, "http://hello.sites.test/");
+    assert_eq!(first.site.status, SiteStatus::ClaimedUnpublished);
+    assert_eq!(first.site.visibility, Visibility::Private);
+
+    let replay = fx.engine.claim(OWNER, "hello", SITE_KEY, NOW + 1).unwrap();
+    assert!(replay.already_claimed);
+    assert_eq!(replay.site.id, first.site.id);
+}
+
+#[test]
+fn claim_rejects_unallowlisted_owner() {
+    let mut fx = fixture();
+    let result = fx.engine.claim(OTHER_OWNER, "hello", SITE_KEY, NOW);
+    assert!(matches!(result, Err(EngineError::NotAllowlisted)));
+}
+
+#[test]
+fn claim_rejects_taken_and_invalid_names() {
+    let mut fx = fixture();
+    fx.engine
+        .store_mut()
+        .allow_pubkey(OTHER_OWNER, "other", NOW)
+        .unwrap();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+
+    let taken = fx.engine.claim(OTHER_OWNER, "hello", OTHER_SITE_KEY, NOW);
+    assert!(matches!(taken, Err(EngineError::NameTaken)));
+
+    let reserved = fx.engine.claim(OWNER, "api", OTHER_SITE_KEY, NOW);
+    assert!(matches!(reserved, Err(EngineError::Proto(_))));
+
+    let invalid = fx.engine.claim(OWNER, "Bad_Name", OTHER_SITE_KEY, NOW);
+    assert!(matches!(invalid, Err(EngineError::Proto(_))));
+
+    let bad_key = fx.engine.claim(OWNER, "world", "not-hex", NOW);
+    assert!(matches!(bad_key, Err(EngineError::Validation(_))));
+}
+
+#[test]
+fn claim_rejects_reused_site_key() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    let reused = fx.engine.claim(OWNER, "world", SITE_KEY, NOW);
+    assert!(matches!(reused, Err(EngineError::Conflict(_))));
+}
+
+#[test]
+fn claim_enforces_per_owner_limit() {
+    let mut fx = fixture();
+    // Bounded loop: exactly MAX_SITES_PER_OWNER claims.
+    for index in 0..MAX_SITES_PER_OWNER {
+        let key = format!("{:064x}", 0x4000 + index);
+        fx.engine
+            .claim(OWNER, &format!("site-{index}"), &key, NOW)
+            .unwrap();
+    }
+    let over = fx
+        .engine
+        .claim(OWNER, "one-too-many", &format!("{:064x}", 0x9000), NOW);
+    assert!(matches!(over, Err(EngineError::TooManySites)));
+}
+
+// ---- publish ----------------------------------------------------------------
+
+#[test]
+fn publish_full_flow_serves_content() {
+    let mut fx = fixture();
+    let outcome = publish_site(&mut fx.engine, "hello", SITE_KEY);
+    assert_eq!(outcome.version_number, 1);
+    assert_eq!(outcome.path_count, 2);
+    assert_eq!(outcome.url, "http://hello.sites.test/");
+
+    let site = fx.engine.resolve_site("hello").unwrap().unwrap();
+    assert_eq!(site.status, SiteStatus::Published);
+
+    let found = fx
+        .engine
+        .lookup_file(&site, "/index.html")
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.size, b"<h1>hello</h1>".len() as u64);
+    assert_eq!(found.path, "/index.html");
+    assert_eq!(
+        fx.engine.read_blob(&found.sha256).unwrap(),
+        b"<h1>hello</h1>"
+    );
+
+    // Root and folder fallbacks resolve to the index manifest path.
+    let root = fx.engine.lookup_file(&site, "/").unwrap().unwrap();
+    assert_eq!(root.path, "/index.html");
+    assert!(
+        fx.engine
+            .lookup_file(&site, "/css/style.css")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        fx.engine
+            .lookup_file(&site, "/missing.html")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn second_publish_dedups_blobs_and_bumps_version() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+
+    let index: &[u8] = b"<h1>hello</h1>"; // unchanged file
+    let fresh: &[u8] = b"<p>new page</p>";
+    let manifest = manifest_for(&[("/index.html", index), ("/new.html", fresh)]);
+    let begun = fx
+        .engine
+        .begin_publish(SITE_KEY, &manifest, false, None, NOW + 10)
+        .unwrap();
+    // Only the new content is missing; the unchanged file dedups.
+    assert_eq!(begun.missing, vec![sha(fresh)]);
+
+    fx.engine
+        .upload_blob(SITE_KEY, &begun.publish_id, &sha(fresh), fresh, NOW + 10)
+        .unwrap();
+    let outcome = fx
+        .engine
+        .finalize_publish(SITE_KEY, &begun.publish_id, NOW + 10)
+        .unwrap();
+    assert_eq!(outcome.version_number, 2);
+
+    let site = fx.engine.resolve_site("hello").unwrap().unwrap();
+    assert!(fx.engine.lookup_file(&site, "/new.html").unwrap().is_some());
+    // Old version's exclusive file is gone from the active version.
+    assert!(
+        fx.engine
+            .lookup_file(&site, "/css/style.css")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn begin_publish_rejects_unknown_key_and_bad_manifest() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+
+    let manifest = manifest_for(&[("/index.html", b"x")]);
+    let unknown = fx
+        .engine
+        .begin_publish(OTHER_SITE_KEY, &manifest, false, None, NOW);
+    assert!(matches!(unknown, Err(EngineError::SiteNotFound)));
+
+    let empty = PublishManifest { files: vec![] };
+    let invalid = fx.engine.begin_publish(SITE_KEY, &empty, false, None, NOW);
+    assert!(matches!(invalid, Err(EngineError::Proto(_))));
+}
+
+#[test]
+fn begin_publish_stops_after_owner_deallowlisted() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    fx.engine.store_mut().disallow_pubkey(OWNER).unwrap();
+    let manifest = manifest_for(&[("/index.html", b"x")]);
+    let result = fx
+        .engine
+        .begin_publish(SITE_KEY, &manifest, false, None, NOW);
+    assert!(matches!(result, Err(EngineError::NotAllowlisted)));
+}
+
+#[test]
+fn upload_blob_negative_paths() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    fx.engine
+        .store_mut()
+        .allow_pubkey(OTHER_OWNER, "other", NOW)
+        .unwrap();
+    fx.engine
+        .claim(OTHER_OWNER, "other", OTHER_SITE_KEY, NOW)
+        .unwrap();
+
+    let content: &[u8] = b"<h1>hello</h1>";
+    let manifest = manifest_for(&[("/index.html", content)]);
+    let begun = fx
+        .engine
+        .begin_publish(SITE_KEY, &manifest, false, None, NOW)
+        .unwrap();
+
+    // Another site's key may not upload into this publish.
+    let foreign = fx.engine.upload_blob(
+        OTHER_SITE_KEY,
+        &begun.publish_id,
+        &sha(content),
+        content,
+        NOW,
+    );
+    assert!(matches!(foreign, Err(EngineError::NotAuthorized)));
+
+    // A hash the manifest does not reference is rejected.
+    let stray: &[u8] = b"stray bytes";
+    let unlisted = fx
+        .engine
+        .upload_blob(SITE_KEY, &begun.publish_id, &sha(stray), stray, NOW);
+    assert!(matches!(unlisted, Err(EngineError::Validation(_))));
+
+    // Size mismatch against the manifest is rejected.
+    let truncated = fx.engine.upload_blob(
+        SITE_KEY,
+        &begun.publish_id,
+        &sha(content),
+        &content[..3],
+        NOW,
+    );
+    assert!(matches!(truncated, Err(EngineError::Validation(_))));
+
+    // Replay of a good upload is fine.
+    fx.engine
+        .upload_blob(SITE_KEY, &begun.publish_id, &sha(content), content, NOW)
+        .unwrap();
+    fx.engine
+        .upload_blob(SITE_KEY, &begun.publish_id, &sha(content), content, NOW)
+        .unwrap();
+
+    // After finalize, further uploads conflict.
+    fx.engine
+        .finalize_publish(SITE_KEY, &begun.publish_id, NOW)
+        .unwrap();
+    let late = fx
+        .engine
+        .upload_blob(SITE_KEY, &begun.publish_id, &sha(content), content, NOW);
+    assert!(matches!(late, Err(EngineError::Conflict(_))));
+}
+
+#[test]
+fn finalize_requires_all_blobs_and_replays_idempotently() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    let content: &[u8] = b"<h1>hello</h1>";
+    let manifest = manifest_for(&[("/index.html", content)]);
+    let begun = fx
+        .engine
+        .begin_publish(SITE_KEY, &manifest, false, None, NOW)
+        .unwrap();
+
+    let early = fx.engine.finalize_publish(SITE_KEY, &begun.publish_id, NOW);
+    assert!(matches!(
+        early,
+        Err(EngineError::Conflict("publish has missing blobs"))
+    ));
+
+    fx.engine
+        .upload_blob(SITE_KEY, &begun.publish_id, &sha(content), content, NOW)
+        .unwrap();
+    let first = fx
+        .engine
+        .finalize_publish(SITE_KEY, &begun.publish_id, NOW)
+        .unwrap();
+    let replay = fx
+        .engine
+        .finalize_publish(SITE_KEY, &begun.publish_id, NOW + 5)
+        .unwrap();
+    assert_eq!(first.version_number, replay.version_number);
+
+    let unknown = fx.engine.finalize_publish(SITE_KEY, "pub_missing", NOW);
+    assert!(matches!(unknown, Err(EngineError::PublishNotFound)));
+}
+
+// ---- sharing -------------------------------------------------------------
+
+#[test]
+fn sharing_owner_and_site_key_can_mutate_others_cannot() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+
+    let request = SharingRequest {
+        visibility: Some("shared".into()),
+        confirm_public: false,
+        add_emails: vec!["Friend@Example.com".into()],
+        remove_emails: vec![],
+    };
+    let by_owner = fx
+        .engine
+        .set_sharing(OWNER, "hello", &request, NOW)
+        .unwrap();
+    assert_eq!(by_owner.visibility, "shared");
+    assert_eq!(by_owner.shared_emails, vec!["friend@example.com"]);
+
+    let by_site_key = fx
+        .engine
+        .set_sharing(
+            SITE_KEY,
+            "hello",
+            &SharingRequest {
+                visibility: None,
+                confirm_public: false,
+                add_emails: vec!["second@example.com".into()],
+                remove_emails: vec![],
+            },
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(by_site_key.shared_emails.len(), 2);
+
+    let by_rando = fx.engine.set_sharing(OTHER_OWNER, "hello", &request, NOW);
+    assert!(matches!(by_rando, Err(EngineError::NotAuthorized)));
+
+    let missing = fx.engine.set_sharing(OWNER, "ghost", &request, NOW);
+    assert!(matches!(missing, Err(EngineError::SiteNotFound)));
+}
+
+#[test]
+fn public_requires_explicit_confirmation() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+
+    let unconfirmed = SharingRequest {
+        visibility: Some("public".into()),
+        confirm_public: false,
+        add_emails: vec![],
+        remove_emails: vec![],
+    };
+    let rejected = fx.engine.set_sharing(OWNER, "hello", &unconfirmed, NOW);
+    assert!(matches!(rejected, Err(EngineError::Validation(_))));
+
+    let confirmed = SharingRequest {
+        confirm_public: true,
+        ..unconfirmed
+    };
+    let response = fx
+        .engine
+        .set_sharing(OWNER, "hello", &confirmed, NOW)
+        .unwrap();
+    assert_eq!(response.visibility, "public");
+}
+
+#[test]
+fn sharing_validates_emails_and_limits() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+
+    let bad_email = SharingRequest {
+        visibility: None,
+        confirm_public: false,
+        add_emails: vec!["not-an-email".into()],
+        remove_emails: vec![],
+    };
+    assert!(matches!(
+        fx.engine.set_sharing(OWNER, "hello", &bad_email, NOW),
+        Err(EngineError::Validation(_))
+    ));
+
+    let too_many_at_once = SharingRequest {
+        visibility: None,
+        confirm_public: false,
+        add_emails: (0..21).map(|i| format!("user{i}@example.com")).collect(),
+        remove_emails: vec![],
+    };
+    assert!(matches!(
+        fx.engine
+            .set_sharing(OWNER, "hello", &too_many_at_once, NOW),
+        Err(EngineError::Validation(_))
+    ));
+
+    // Fill the share table to the per-site cap in bounded batches.
+    let mut added: u32 = 0;
+    while added < MAX_SHARES_PER_SITE {
+        let batch = SharingRequest {
+            visibility: None,
+            confirm_public: false,
+            add_emails: (added..(added + 10).min(MAX_SHARES_PER_SITE))
+                .map(|i| format!("user{i}@example.com"))
+                .collect(),
+            remove_emails: vec![],
+        };
+        fx.engine.set_sharing(OWNER, "hello", &batch, NOW).unwrap();
+        added += 10;
+    }
+    let over_cap = SharingRequest {
+        visibility: None,
+        confirm_public: false,
+        add_emails: vec!["overflow@example.com".into()],
+        remove_emails: vec![],
+    };
+    assert!(matches!(
+        fx.engine.set_sharing(OWNER, "hello", &over_cap, NOW),
+        Err(EngineError::TooManyShares)
+    ));
+}
+
+// ---- viewing and magic links ------------------------------------------------
+
+#[test]
+fn public_site_is_viewable_without_cookie() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+    fx.engine
+        .set_sharing(
+            OWNER,
+            "hello",
+            &SharingRequest {
+                visibility: Some("public".into()),
+                confirm_public: true,
+                add_emails: vec![],
+                remove_emails: vec![],
+            },
+            NOW,
+        )
+        .unwrap();
+    let site = fx.engine.resolve_site("hello").unwrap().unwrap();
+    assert_eq!(
+        fx.engine.view_access(&site, None, NOW).unwrap(),
+        ViewAccess::Allowed
+    );
+}
+
+#[test]
+fn shared_site_full_magic_link_flow() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+    fx.engine
+        .set_sharing(
+            OWNER,
+            "hello",
+            &SharingRequest {
+                visibility: Some("shared".into()),
+                confirm_public: false,
+                add_emails: vec!["friend@example.com".into()],
+                remove_emails: vec![],
+            },
+            NOW,
+        )
+        .unwrap();
+    let site = fx.engine.resolve_site("hello").unwrap().unwrap();
+
+    // No cookie: needs login.
+    assert_eq!(
+        fx.engine.view_access(&site, None, NOW).unwrap(),
+        ViewAccess::NeedsLogin
+    );
+
+    // Unshared email gets no link (generic response).
+    assert!(
+        fx.engine
+            .request_login("hello", "stranger@example.com", NOW)
+            .unwrap()
+            .is_none()
+    );
+    // Private sites never issue links.
+    assert!(
+        fx.engine
+            .request_login("ghost", "friend@example.com", NOW)
+            .unwrap()
+            .is_none()
+    );
+
+    // Shared email gets a link.
+    let link = fx
+        .engine
+        .request_login("hello", "Friend@Example.com", NOW)
+        .unwrap()
+        .unwrap();
+    assert!(
+        link.url
+            .starts_with("http://hello.sites.test/_finite/auth?token=")
+    );
+    let token = link.url.split("token=").nth(1).unwrap().to_string();
+
+    let (login_site, cookie) = fx.engine.redeem_login(&token, NOW + 60).unwrap();
+    assert_eq!(login_site.id, site.id);
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&cookie), NOW + 120)
+            .unwrap(),
+        ViewAccess::Allowed
+    );
+
+    // Token is single use.
+    assert!(matches!(
+        fx.engine.redeem_login(&token, NOW + 61),
+        Err(EngineError::Validation(_))
+    ));
+
+    // Revoking the email revokes access even with a live cookie.
+    fx.engine
+        .set_sharing(
+            OWNER,
+            "hello",
+            &SharingRequest {
+                visibility: None,
+                confirm_public: false,
+                add_emails: vec![],
+                remove_emails: vec!["friend@example.com".into()],
+            },
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&cookie), NOW + 180)
+            .unwrap(),
+        ViewAccess::NeedsLogin
+    );
+}
+
+#[test]
+fn login_tokens_expire() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+    fx.engine
+        .set_sharing(
+            OWNER,
+            "hello",
+            &SharingRequest {
+                visibility: Some("shared".into()),
+                confirm_public: false,
+                add_emails: vec!["friend@example.com".into()],
+                remove_emails: vec![],
+            },
+            NOW,
+        )
+        .unwrap();
+    let link = fx
+        .engine
+        .request_login("hello", "friend@example.com", NOW)
+        .unwrap()
+        .unwrap();
+    let token = link.url.split("token=").nth(1).unwrap().to_string();
+    let expired = fx
+        .engine
+        .redeem_login(&token, NOW + LOGIN_TOKEN_TTL_SECONDS + 1);
+    assert!(matches!(expired, Err(EngineError::Validation(_))));
+
+    let garbage = fx.engine.redeem_login("zz", NOW);
+    assert!(matches!(garbage, Err(EngineError::Validation(_))));
+}
+
+#[test]
+fn unpublished_site_is_never_viewable() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    let site = fx.engine.resolve_site("hello").unwrap().unwrap();
+    assert_eq!(
+        fx.engine.view_access(&site, None, NOW).unwrap(),
+        ViewAccess::NeedsLogin
+    );
+    assert!(fx.engine.lookup_file(&site, "/").unwrap().is_none());
+}
+
+// ---- listing / status -----------------------------------------------------
+
+#[test]
+fn list_and_status_respect_ownership() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+
+    let sites = fx.engine.list_sites(OWNER).unwrap();
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].name, "hello");
+    assert_eq!(sites[0].kind, "static");
+    assert_eq!(sites[0].active_version, Some(1));
+    assert!(fx.engine.list_sites(OTHER_OWNER).unwrap().is_empty());
+
+    let by_owner = fx.engine.site_status(OWNER, "hello").unwrap();
+    assert_eq!(by_owner.status, "published");
+    let by_site_key = fx.engine.site_status(SITE_KEY, "hello").unwrap();
+    assert_eq!(by_site_key.site_id, by_owner.site_id);
+    let by_rando = fx.engine.site_status(OTHER_OWNER, "hello");
+    assert!(matches!(by_rando, Err(EngineError::NotAuthorized)));
+    let missing = fx.engine.site_status(OWNER, "ghost");
+    assert!(matches!(missing, Err(EngineError::SiteNotFound)));
+}
+
+#[test]
+fn resolve_rejects_invalid_labels() {
+    let fx = fixture();
+    assert!(fx.engine.resolve_site("Bad_Label").unwrap().is_none());
+    assert!(fx.engine.resolve_site("api").unwrap().is_none());
+}
+
+// ---- spa fallback -----------------------------------------------------------
+
+#[test]
+fn spa_publish_routes_unknown_paths_to_index() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    let index: &[u8] = b"<div id=app></div>";
+    let manifest = manifest_for(&[("/index.html", index), ("/assets/app.js", b"render()")]);
+    let begun = fx
+        .engine
+        .begin_publish(SITE_KEY, &manifest, true, None, NOW)
+        .unwrap();
+    fx.engine
+        .upload_blob(SITE_KEY, &begun.publish_id, &sha(index), index, NOW)
+        .unwrap();
+    fx.engine
+        .upload_blob(
+            SITE_KEY,
+            &begun.publish_id,
+            &sha(b"render()"),
+            b"render()",
+            NOW,
+        )
+        .unwrap();
+    fx.engine
+        .finalize_publish(SITE_KEY, &begun.publish_id, NOW)
+        .unwrap();
+
+    let site = fx.engine.resolve_site("hello").unwrap().unwrap();
+    assert!(site.active_version_spa);
+
+    // Real files still serve exactly.
+    let asset = fx
+        .engine
+        .lookup_file(&site, "/assets/app.js")
+        .unwrap()
+        .unwrap();
+    assert_eq!(asset.path, "/assets/app.js");
+    // Virtual client-side routes fall back to the app shell.
+    let virtual_route = fx
+        .engine
+        .lookup_file(&site, "/settings/profile")
+        .unwrap()
+        .unwrap();
+    assert_eq!(virtual_route.path, "/index.html");
+}
+
+#[test]
+fn non_spa_publish_keeps_missing_paths_missing() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+    let site = fx.engine.resolve_site("hello").unwrap().unwrap();
+    assert!(!site.active_version_spa);
+    assert!(
+        fx.engine
+            .lookup_file(&site, "/settings/profile")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn spa_publish_requires_root_index() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    let manifest = manifest_for(&[("/main.html", b"<p>not an index</p>")]);
+    let rejected = fx
+        .engine
+        .begin_publish(SITE_KEY, &manifest, true, None, NOW);
+    assert!(matches!(rejected, Err(EngineError::Validation(_))));
+}
+
+// ---- app sites (tier 2) -------------------------------------------------------
+
+fn publish_app(
+    engine: &mut Engine,
+    name: &str,
+    site_key: &str,
+    start: &str,
+) -> crate::FinalizeOutcome {
+    engine.claim(OWNER, name, site_key, NOW).unwrap();
+    let bundle: &[u8] = b"pretend-tarball-bytes";
+    let manifest = manifest_for(&[("/app.tar.gz", bundle)]);
+    let begun = engine
+        .begin_publish(site_key, &manifest, false, Some(start), NOW)
+        .unwrap();
+    engine
+        .upload_blob(site_key, &begun.publish_id, &sha(bundle), bundle, NOW)
+        .unwrap();
+    engine
+        .finalize_publish(site_key, &begun.publish_id, NOW)
+        .unwrap()
+}
+
+#[test]
+fn app_publish_returns_deploy_info() {
+    let mut fx = fixture();
+    let outcome = publish_app(&mut fx.engine, "myapp", SITE_KEY, "node server.js");
+    let deploy = outcome.app.expect("app publish carries deploy info");
+    assert_eq!(deploy.port, 21000);
+    assert_eq!(deploy.start_command, "node server.js");
+    assert_eq!(deploy.bundle_sha256, sha(b"pretend-tarball-bytes"));
+
+    // Reconciliation sees the same deploy.
+    let deploys = fx.engine.app_deploys().unwrap();
+    assert_eq!(deploys.len(), 1);
+    assert_eq!(deploys[0].port, 21000);
+    assert_eq!(fx.engine.site_status(OWNER, "myapp").unwrap().kind, "app");
+
+    // Static publishes carry no deploy info.
+    let static_outcome = publish_site(&mut fx.engine, "plain", OTHER_SITE_KEY);
+    assert!(static_outcome.app.is_none());
+}
+
+#[test]
+fn app_manifest_rules_are_enforced() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "myapp", SITE_KEY, NOW).unwrap();
+
+    // Wrong manifest shape.
+    let multi = manifest_for(&[("/app.tar.gz", b"x"), ("/extra.txt", b"y")]);
+    let rejected = fx
+        .engine
+        .begin_publish(SITE_KEY, &multi, false, Some("node server.js"), NOW);
+    assert!(matches!(rejected, Err(EngineError::Validation(_))));
+
+    // Apps and the spa flag are mutually exclusive.
+    let bundle_only = manifest_for(&[("/app.tar.gz", b"x")]);
+    let spa_app =
+        fx.engine
+            .begin_publish(SITE_KEY, &bundle_only, true, Some("node server.js"), NOW);
+    assert!(matches!(spa_app, Err(EngineError::Validation(_))));
+
+    // Bad commands.
+    for bad in ["", "   ", "evil\ncommand", &"x".repeat(2000)] {
+        let result = fx
+            .engine
+            .begin_publish(SITE_KEY, &bundle_only, false, Some(bad), NOW);
+        assert!(matches!(result, Err(EngineError::Validation(_))), "{bad:?}");
+    }
+}
+
+#[test]
+fn site_kind_cannot_change_after_first_publish() {
+    let mut fx = fixture();
+    publish_app(&mut fx.engine, "myapp", SITE_KEY, "node server.js");
+
+    // Static publish onto an app site is rejected.
+    let static_manifest = manifest_for(&[("/index.html", b"<h1>hi</h1>")]);
+    let to_static = fx
+        .engine
+        .begin_publish(SITE_KEY, &static_manifest, false, None, NOW + 1);
+    assert!(matches!(to_static, Err(EngineError::Conflict(_))));
+
+    // App publish onto a static site is rejected.
+    publish_site(&mut fx.engine, "plain", OTHER_SITE_KEY);
+    let bundle = manifest_for(&[("/app.tar.gz", b"x")]);
+    let to_app =
+        fx.engine
+            .begin_publish(OTHER_SITE_KEY, &bundle, false, Some("node x.js"), NOW + 1);
+    assert!(matches!(to_app, Err(EngineError::Conflict(_))));
+}

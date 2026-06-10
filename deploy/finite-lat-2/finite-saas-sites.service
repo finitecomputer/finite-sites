@@ -1,0 +1,46 @@
+# Finite Sites on the SaaS box, alongside finite-saas-core/web.
+# Install: copy to /etc/systemd/system/finite-saas-sites.service
+# Secrets (RESEND_API_KEY) live in /etc/finite-saas/sites.env, operator-created,
+# never written by deploys — same convention as core.env/web.env.
+#
+# The `--app-runner kata` mode REQUIRES the kata drop-in
+# (finite-saas-sites-kata.conf) which relaxes the filesystem hardening below
+# so `sudo nerdctl` can drive containerd/CNI; with Kata, tenant isolation is
+# the microVM boundary. The hardening here still applies to the daemon under
+# the systemd/none runners.
+
+[Unit]
+Description=Finite Sites (registry, publishing API, site serving)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=finite-sites
+Group=finite-sites
+EnvironmentFile=/etc/finite-saas/sites.env
+ExecStart=/usr/local/bin/finitesitesd serve \
+  --data /var/lib/finite-sites \
+  --listen 127.0.0.1:8787 \
+  --base-domain finite.chat \
+  --api-url https://api.finite.chat \
+  --site-scheme https \
+  --site-port none \
+  --mailer resend \
+  --mail-from "Finite Sites <links@finite.chat>" \
+  --app-runner kata
+Restart=on-failure
+RestartSec=2
+
+# Hardening: the process needs its data dir and nothing else writable.
+StateDirectory=finite-sites
+ProtectSystem=strict
+ReadWritePaths=/var/lib/finite-sites
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+# Finite Sites Caddyfile for finite-lat-2 (dedicated sites box).
+#
+# TLS: Cloudflare proxies both names (orange cloud) and terminates public
+# TLS at the edge with its Universal SSL wildcard. The cert referenced here
+# is a Cloudflare Origin CA certificate for `finite.chat, *.finite.chat`
+# (SSL/TLS -> Origin Server -> Create Certificate), so the zone runs in
+# Full (strict) mode. No ACME, no DNS plugin, no API token on the box.
+#
+# Both blocks proxy to the same finitesitesd process; it splits the API
+# plane from the site plane by Host header itself.
+
+api.finite.chat {
+	tls /etc/finite-saas/certs/finite-chat-origin.pem /etc/finite-saas/certs/finite-chat-origin.key
+	reverse_proxy 127.0.0.1:8787
+}
+
+*.finite.chat {
+	tls /etc/finite-saas/certs/finite-chat-origin.pem /etc/finite-saas/certs/finite-chat-origin.key
+	reverse_proxy 127.0.0.1:8787
+}

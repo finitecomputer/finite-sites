@@ -1,0 +1,194 @@
+# Deploying Finite Sites To finite-lat-2
+
+Finite Sites runs on its own box, **finite-lat-2 (64.34.80.19)**: Caddy in
+front of one `finite-saas-sites` systemd unit. Agent machines live on
+finite-lat-1; keeping tenant-facing serving off the Core box removes the
+shared blast radius entirely. Cloudflare holds the `finite.chat` zone and
+proxies both names, hiding the box IP and absorbing floods.
+
+Unit, Caddyfile, and env example live in `deploy/finite-lat-2/`.
+
+**Status (2026-06-09): FULLY LIVE.** Box setup (3–4), the Cloudflare zone
+(proxied `*` and `api` A records), the Origin CA cert (installed at
+`/etc/finite-saas/certs/finite-chat-origin.{pem,key}`, zone on Full
+strict), and outbound mail (finite.chat verified at Resend, unit running
+`--mailer resend` with the send-only key in `/etc/finite-saas/sites.env`)
+are all done. Validation gates passed: signed claim + publish from a
+remote machine through the proxy, public serving, API-host dispatch, a
+real magic link delivered through Resend, and restart durability. The
+only standing operational TODO is the backup scope (section 6).
+
+## 1. Cloudflare zone setup (one time)
+
+In the `finite.chat` zone:
+
+1. **DNS records** (both Proxied / orange cloud):
+   - `A  *    64.34.80.19`
+   - `A  api  64.34.80.19`
+   (The apex `finite.chat` is free for marketing/redirect use; sites and the
+   API do not need it.)
+2. **SSL/TLS -> Overview**: set encryption mode to **Full**. The box
+   currently serves Caddy-internal certs, which Full accepts. To upgrade to
+   **Full (strict)** later: SSL/TLS -> Origin Server -> Create Certificate
+   for `finite.chat, *.finite.chat`, install as
+   `/etc/finite-saas/certs/finite-chat-origin.{pem,key}` (key mode 0600),
+   replace `tls internal` with the cert paths in `/etc/caddy/Caddyfile`,
+   reload Caddy, then flip the zone to Full (strict).
+3. Optional but recommended: **Email Routing** for inbound, forwarding
+   `abuse@finite.chat` and `links@finite.chat` replies to a real mailbox.
+
+Notes:
+- Universal SSL covers exactly one wildcard level (`a.finite.chat`, never
+  `a.b.finite.chat`) — matching the platform's one-label site names.
+- Cloudflare's proxy body limit (100 MB on free) clears the 25 MiB blob cap.
+- Because Cloudflare proxies, `CF-Connecting-IP` is trustworthy; the
+  login-link rate limiter uses it.
+
+## 2. Outbound mail (Resend)
+
+Cloudflare Email Routing is inbound-only; magic links are sent through
+Resend (or Postmark — both are wired in `--mailer`):
+
+1. Create a Resend account, add the `finite.chat` domain, and add the DKIM
+   and Return-Path records Resend lists into the Cloudflare zone
+   (DNS-only/grey cloud, as instructed by Resend).
+2. Wait for the domain to verify, then create an API key.
+3. Put the key in `/etc/finite-saas/sites.env` as `RESEND_API_KEY=...`.
+4. Switch the unit from the bootstrap dev mailer to Resend: edit
+   `/etc/systemd/system/finite-saas-sites.service`, replacing
+   `--mailer dev` with
+   `--mailer resend --mail-from "Finite Sites <links@finite.chat>"`,
+   then `sudo systemctl daemon-reload && sudo systemctl restart
+   finite-saas-sites`.
+
+Until then the dev mailer writes links to
+`/var/lib/finite-sites/outbox/`, which is enough for operator testing but
+means shared-visibility sites cannot deliver links to real viewers.
+
+## 3. Box setup (done on finite-lat-2)
+
+```sh
+sudo apt-get install -y caddy build-essential pkg-config rsync
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+# source synced to ~/finite-sites (rsync, excluding target/.git/.dev-data)
+cd ~/finite-sites && cargo build --release
+
+sudo install -m 0755 target/release/finitesitesd target/release/fsite /usr/local/bin/
+sudo useradd --system --home /var/lib/finite-sites --shell /usr/sbin/nologin finite-sites
+sudo install -d -o finite-sites -g finite-sites /var/lib/finite-sites
+sudo install -d /etc/finite-saas
+echo "# RESEND_API_KEY=" | sudo tee /etc/finite-saas/sites.env && sudo chmod 0640 /etc/finite-saas/sites.env
+sudo install -m 0644 deploy/finite-lat-2/finite-saas-sites.service /etc/systemd/system/
+# /etc/caddy/Caddyfile from deploy/finite-lat-2/Caddyfile-sites (tls internal bootstrap)
+sudo systemctl daemon-reload && sudo systemctl enable --now finite-saas-sites && sudo systemctl reload caddy
+```
+
+The installed unit currently uses `--mailer dev` (see section 2 for the
+flip). The repo copy of the unit shows the production mailer flags.
+
+NIP-98 binds signatures to the exact URL, so on-box smoke tests with
+`FINITE_SITES_API=http://127.0.0.1:8787` fail closed against the
+production `--api-url https://api.finite.chat` ("url mismatch"). For
+pre-DNS smoke testing, temporarily sed the unit's `--api-url` to the local
+address and restore it afterwards; once Cloudflare DNS is live, test the
+real URL from anywhere.
+
+## 4. Allowlist and runtime template
+
+```sh
+sudo -u finite-sites finitesitesd allow --data /var/lib/finite-sites <npub> --note "paul"
+```
+
+Agent runtimes (on finite-lat-1) need two things staged by
+`prepare-runtime-template` (finitecomputer side): the `fsite` binary on
+PATH with `FINITE_SITES_API=https://api.finite.chat`, and the
+`finite-sites-publishing` skill from `skills/`.
+
+## 4b. Tier-2 app hosting (installed 2026-06-10)
+
+App sites run as `finite-app@{site_id}` systemd template instances. Box
+requirements, all in place:
+
+- runtimes on the root filesystem (apps cannot read /home): node (apt),
+  `/usr/local/bin/bun`, `/usr/local/bin/uv`
+- `deploy/finite-lat-2/finite-app@.service` ->
+  `/etc/systemd/system/finite-app@.service`
+- polkitd installed, `deploy/finite-lat-2/50-finite-sites.rules` ->
+  `/etc/polkit-1/rules.d/` (lets the finite-sites user manage
+  `finite-app@*` units over D-Bus; sudo cannot work because the daemon
+  runs with NoNewPrivileges)
+- `/var/lib/finite-sites/apps/` owned by finite-sites
+- the service runs with `--app-runner systemd`
+
+App state lives in `/var/lib/finite-app/{site_id}` (StateDirectory) —
+add it to the backup scope alongside `/var/lib/finite-sites`. App logs:
+`journalctl -u finite-app@{site_id}`.
+
+## 4c. Tier-2 Kata microVM runner (installed 2026-06-10, ADR-0015)
+
+The production runner is **Kata Containers microVMs** (Cloud Hypervisor),
+hardware-isolated. This is what `--app-runner kata` uses; the systemd
+runner (4b) stays available for KVM-less boxes. Box requirements, all in
+place on finite-lat-2 (KVM present, nested virt on):
+
+- containerd (apt) running; `sudo systemctl enable --now containerd`.
+- **kata-static** release extracted to `/opt/kata`, with
+  `containerd-shim-kata-v2` and `kata-runtime` symlinked into
+  `/usr/local/bin`, and Cloud Hypervisor selected:
+  `cp /opt/kata/share/defaults/kata-containers/configuration-clh.toml
+  /etc/kata-containers/configuration.toml`. Verify with
+  `kata-runtime check` ("System can currently create Kata Containers").
+- **nerdctl** binary in `/usr/local/bin` and **CNI plugins** in
+  `/opt/cni/bin` (both from upstream release tarballs). App images
+  (node:22-slim, oven/bun:1, astral-sh/uv) are pulled from public
+  registries on first use; no image build, so no buildkit.
+- App data dirs: `/var/lib/finite-sites/apps/{site}/data` (bind-mounted as
+  `$DATA_DIR`, survives stop/start) — this is the Kata-runner backup scope.
+- **Privilege wiring** (the one delicate part): the Kata runner shells
+  `sudo nerdctl` because CNI bridge setup needs CAP_NET_ADMIN. Install
+  `deploy/finite-lat-2/finite-sites-nerdctl-sudoers` ->
+  `/etc/sudoers.d/finite-sites-nerdctl`, and the drop-in
+  `deploy/finite-lat-2/finite-saas-sites-kata.conf` ->
+  `/etc/systemd/system/finite-saas-sites.service.d/kata.conf` (relaxes the
+  daemon's own fs sandbox so nerdctl can run; tenant isolation is now the
+  microVM boundary). Then the unit's ExecStart uses `--app-runner kata`.
+
+App logs under Kata: `sudo nerdctl logs finite-app-{site_id}`. Inspect the
+fleet: `sudo nerdctl ps` / `sudo nerdctl stats --no-stream`.
+
+**Density:** the Supervisor stops apps idle past `--app-idle-timeout`
+(default 900s) and wakes them on the next request (~1.4s cold, ~0.3s
+warm), so idle tenants cost ~0 RAM. Resident app microVMs measured
+8–87 MiB each.
+
+## 5. Validation gates
+
+Box-local gates (passed 2026-06-09 with a temporary local `--api-url`):
+
+- `/api/v1/healthz` returns `{"ok":true}` through Caddy TLS.
+- claim → publish → share `examples/hello-site` serves through Caddy.
+- `https://api.finite.chat/` classifies as the API plane, not a site page
+  (dispatch regression gate).
+- Restarting `finite-saas-sites` loses nothing.
+
+Tier-2 gates (passed 2026-06-10): bun+SQLite, FastHTML (uv inline
+deps), and Next.js standalone apps publish with `fsite publish-app`,
+serve through the proxy with their visibility gates, persist data in
+`$DATA_DIR`, and come back up via reconcile after a daemon restart.
+
+Remaining gates once Cloudflare DNS is live:
+
+- `curl https://api.finite.chat/api/v1/healthz` from anywhere.
+- `fsite claim` + `fsite publish` from a real agent workspace (proves
+  NIP-98 URL matching through the proxy — closes debt ledger item 7).
+- A magic link arrives at a real inbox (after the Resend flip), logs the
+  viewer in, and removing the email revokes access on refresh.
+
+## 6. Backups
+
+Add `/var/lib/finite-sites` to the offsite backup scope. Registry + blobs
+are the whole state; the cookie secret file invalidates viewer logins if
+lost (acceptable) but should be backed up to keep sessions across
+restores. Litestream for `registry.db` is debt ledger item 4 and should
+land shortly after go-live.

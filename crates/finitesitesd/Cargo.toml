@@ -1,0 +1,30 @@
+[package]
+name = "finitesitesd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+finitesites-proto = { path = "../finitesites-proto" }
+finitesites-blob = { path = "../finitesites-blob" }
+finitesites-store = { path = "../finitesites-store" }
+finitesites-engine = { path = "../finitesites-engine" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+ureq = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+sha2 = { workspace = true }
