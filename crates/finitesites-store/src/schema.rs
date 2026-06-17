@@ -2,7 +2,7 @@
 //! transactions; the only JSON column is bounded audit metadata.
 //!
 //! Ported from finite-site's Postgres sketch (docs/schema/) with the nsite
-//! event columns dropped and sharing/auth/allowlist tables added. SQLite is
+//! event columns dropped and sharing/auth/publish-grant tables added. SQLite is
 //! the v1 engine; types stay portable (TEXT ids, INTEGER unix seconds).
 
 pub const SCHEMA_SQL: &str = "
@@ -11,6 +11,21 @@ CREATE TABLE IF NOT EXISTS allowed_pubkeys (
   note TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS publish_grants (
+  pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
+  source TEXT NOT NULL CHECK (source IN ('operator', 'core')),
+  note TEXT NOT NULL DEFAULT '',
+  expires_at INTEGER CHECK (expires_at IS NULL OR expires_at > 0),
+  granted_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  PRIMARY KEY (pubkey, source),
+  CHECK (revoked_at IS NULL OR revoked_at >= granted_at)
+);
+
+CREATE INDEX IF NOT EXISTS publish_grants_active_pubkey
+  ON publish_grants(pubkey) WHERE revoked_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS sites (
   id TEXT PRIMARY KEY,

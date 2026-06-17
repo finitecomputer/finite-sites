@@ -2,9 +2,9 @@
 //!
 //! Subcommands:
 //!   serve     run the API + site-serving HTTP server
-//!   allow     add a pubkey (hex or npub) to the publishing allowlist
-//!   disallow  remove a pubkey from the allowlist
-//!   allowed   list allowlisted pubkeys
+//!   allow     add an operator publish grant for a pubkey (hex or npub)
+//!   disallow  revoke an operator publish grant
+//!   allowed   list active publishing grants
 //!
 //! All subcommands take `--data DIR`; the registry database, blob store,
 //! cookie secret, and dev-mail outbox live under that directory.
@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use finitesites_blob::BlobStore;
 use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::{hex, ids, npub};
-use finitesites_store::Store;
+use finitesites_store::{PublishGrantSource, Store};
 
 #[derive(Debug)]
 pub struct ServeOptions {
@@ -287,7 +287,7 @@ fn allowlist_mutate(args: &[String], allow: bool) -> Result<(), String> {
         );
     } else {
         let removed = store
-            .disallow_pubkey(&pubkey)
+            .revoke_publish_access(&pubkey, PublishGrantSource::Operator, server::now_unix())
             .map_err(|error| format!("disallow failed: {error}"))?;
         if removed {
             println!(
@@ -295,7 +295,7 @@ fn allowlist_mutate(args: &[String], allow: bool) -> Result<(), String> {
                 npub::encode_npub(&pubkey).expect("valid pubkey")
             );
         } else {
-            println!("pubkey was not on the allowlist");
+            println!("pubkey had no operator publishing grant");
         }
     }
     Ok(())
@@ -305,20 +305,25 @@ fn allowlist_list(args: &[String]) -> Result<(), String> {
     let (flags, _positionals) = parse_flags(args)?;
     let data_dir = flag_value(&flags, "data").ok_or("--data DIR is required")?;
     let store = open_store(Path::new(data_dir))?;
-    let allowed = store
-        .list_allowed()
+    let grants = store
+        .list_publish_grants(server::now_unix())
         .map_err(|error| format!("list failed: {error}"))?;
-    if allowed.is_empty() {
-        println!("allowlist is empty");
+    if grants.is_empty() {
+        println!("publishing grant cache is empty");
         return Ok(());
     }
-    // Bounded: operator-curated list.
-    for (pubkey, note) in allowed {
-        let display = npub::encode_npub(&pubkey).unwrap_or(pubkey);
-        if note.is_empty() {
-            println!("{display}");
+    // Bounded: operator/Core curated list.
+    for grant in grants {
+        let display = npub::encode_npub(&grant.pubkey).unwrap_or(grant.pubkey);
+        let source = grant.source.as_str();
+        let expires = match grant.expires_at {
+            Some(expires_at) => format!(", expires_at={expires_at}"),
+            None => String::new(),
+        };
+        if grant.note.is_empty() {
+            println!("{display}  # source={source}{expires}");
         } else {
-            println!("{display}  # {note}");
+            println!("{display}  # source={source}{expires}, {}", grant.note);
         }
     }
     Ok(())

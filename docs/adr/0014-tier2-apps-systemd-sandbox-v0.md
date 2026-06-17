@@ -18,7 +18,7 @@ FastHTML are the reference examples.
 
 **Isolation posture, stated plainly**: a systemd sandbox is real but it
 is kernel-level, not hardware-level. It is acceptable while every
-publisher is operator-allowlisted; it is not acceptable for hostile
+publisher has an active operator publish grant; it is not acceptable for hostile
 tenants. The upgrade path (roadmap) is moving the same bundle + runspec
 contract onto MicroSandbox/Kata microVMs without changing the publish
 surface. Tracked in the technical debt ledger.

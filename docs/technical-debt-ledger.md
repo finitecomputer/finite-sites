@@ -23,7 +23,7 @@ local default.
 - **Proof**: only `request_link` consults `login_limiter`.
 - **Delete condition**: per-IP budgets on the API plane (claims/publishes
   per pubkey per hour) before registration opens beyond the operator
-  allowlist; Cloudflare rate-limiting rules on `/_finite/*` as
+  publish grant gate; Cloudflare rate-limiting rules on `/_finite/*` as
   belt-and-braces when the zone goes live.
 
 ## 3. One mutex around the engine; blocking IO in async handlers
@@ -52,7 +52,8 @@ local default.
   exists on the platform by watching the missing list.
 - **Proof**: `Store::missing_blobs` consults a global `blobs` table.
 - **Delete condition**: revisit before opening registration beyond the
-  allowlist; either accept formally in the ADR or scope dedup per owner.
+  operator/Core publish grant gate; either accept formally in the ADR or scope
+  dedup per owner.
 
 ## 6. No site delete / name release / key rotation surface
 
@@ -61,7 +62,7 @@ local default.
 - **Proof**: `status IN ('disabled','deleted')` exists in the schema with
   no mutation path.
 - **Delete condition**: operator commands for disable/delete/release with
-  audit events, before non-VIP users are allowlisted.
+  audit events, before non-VIP users receive publishing grants.
 
 ## 7. RESOLVED — NIP-98 URL matching verified through the live proxy
 

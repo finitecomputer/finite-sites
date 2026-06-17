@@ -68,7 +68,7 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
 Use handled errors for client mistakes and operating conditions:
 
 - name already claimed, name reserved or invalid;
-- pubkey not allowlisted;
+- pubkey has no active publish grant;
 - manifest over limits, blob hash/size mismatch;
 - publish not pending, publish has missing blobs;
 - login token unknown, used, or expired;

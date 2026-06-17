@@ -1,5 +1,9 @@
 # Operator Allowlist Instead Of Billing (v1)
 
+Superseded for ongoing product design by ADR-0016. The v1 operator command
+surface remains, but it now writes `operator` rows into the publish grant cache
+instead of being the only authorization model.
+
 Publishing requires the owner's pubkey to be on an operator-curated
 allowlist (`finitesitesd allow <npub>`). Allowlisted users get effectively
 unlimited hosting within the per-owner and per-site limits in

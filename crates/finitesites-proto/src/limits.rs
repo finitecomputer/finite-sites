@@ -18,8 +18,8 @@ pub const MAX_SITE_BYTES: u64 = 512 * 1024 * 1024;
 /// Manifest paths are bounded so the registry never stores unbounded strings.
 pub const MAX_PATH_BYTES: u32 = 512;
 
-/// One owner pubkey may claim at most this many sites. Allowlisted users get
-/// "unlimited within reason"; this is the reason.
+/// One owner pubkey may claim at most this many sites. Publishing-granted
+/// users get "unlimited within reason"; this is the reason.
 pub const MAX_SITES_PER_OWNER: u32 = 100;
 
 /// One site may be shared with at most this many emails. Sharing is

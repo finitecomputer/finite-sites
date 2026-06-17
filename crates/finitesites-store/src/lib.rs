@@ -163,6 +163,41 @@ pub struct FinalizedVersion {
     pub total_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishGrantSource {
+    Operator,
+    Core,
+}
+
+impl PublishGrantSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PublishGrantSource::Operator => "operator",
+            PublishGrantSource::Core => "core",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<PublishGrantSource, StoreError> {
+        match value {
+            "operator" => Ok(PublishGrantSource::Operator),
+            "core" => Ok(PublishGrantSource::Core),
+            _ => Err(StoreError::CorruptState(
+                "unknown publish grant source in db",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishGrant {
+    pub pubkey: String,
+    pub source: PublishGrantSource,
+    pub note: String,
+    pub expires_at: Option<u64>,
+    pub granted_at: u64,
+    pub updated_at: u64,
+}
+
 const SITE_SELECT: &str = "
     SELECT s.id, c.name, s.owner_pubkey, s.site_pubkey, s.status, s.visibility,
            s.active_version_id, v.version_number, COALESCE(v.spa_fallback, 0),
@@ -220,6 +255,7 @@ impl Store {
         )?;
         Self::ensure_column(&conn, "versions", "start_command", "start_command TEXT")?;
         Self::ensure_column(&conn, "publishes", "start_command", "start_command TEXT")?;
+        Self::migrate_legacy_allowed_pubkeys(&conn)?;
         Ok(Store { conn })
     }
 
@@ -241,45 +277,148 @@ impl Store {
         Ok(())
     }
 
-    // ---- allowlist -------------------------------------------------------
-
-    pub fn allow_pubkey(&mut self, pubkey: &str, note: &str, now: u64) -> Result<(), StoreError> {
-        assert!(pubkey.len() == 64);
-        self.conn.execute(
-            "INSERT INTO allowed_pubkeys (pubkey, note, created_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(pubkey) DO UPDATE SET note = ?2",
-            params![pubkey, note, now],
+    fn migrate_legacy_allowed_pubkeys(conn: &Connection) -> Result<(), StoreError> {
+        conn.execute(
+            "INSERT OR IGNORE INTO publish_grants
+                (pubkey, source, note, expires_at, granted_at, updated_at, revoked_at)
+             SELECT pubkey, 'operator', note, NULL, created_at, created_at, NULL
+             FROM allowed_pubkeys",
+            [],
         )?;
         Ok(())
     }
 
+    // ---- publishing grants ----------------------------------------------
+
+    pub fn allow_pubkey(&mut self, pubkey: &str, note: &str, now: u64) -> Result<(), StoreError> {
+        self.grant_publish_access(pubkey, PublishGrantSource::Operator, note, None, now)
+    }
+
     pub fn disallow_pubkey(&mut self, pubkey: &str) -> Result<bool, StoreError> {
-        let removed = self.conn.execute(
-            "DELETE FROM allowed_pubkeys WHERE pubkey = ?1",
-            params![pubkey],
-        )?;
-        Ok(removed > 0)
+        self.revoke_publish_access(pubkey, PublishGrantSource::Operator, 0)
     }
 
     pub fn is_pubkey_allowed(&self, pubkey: &str) -> Result<bool, StoreError> {
+        self.has_publish_access(pubkey, 0)
+    }
+
+    pub fn list_allowed(&self) -> Result<Vec<(String, String)>, StoreError> {
+        let grants = self.list_publish_grants(0)?;
+        let mut out = Vec::with_capacity(grants.len());
+        // Bounded: the publish grant cache is operator/Core curated.
+        for grant in grants {
+            out.push((grant.pubkey, grant.note));
+        }
+        Ok(out)
+    }
+
+    pub fn grant_publish_access(
+        &mut self,
+        pubkey: &str,
+        source: PublishGrantSource,
+        note: &str,
+        expires_at: Option<u64>,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        assert!(pubkey.len() == 64);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO publish_grants
+                (pubkey, source, note, expires_at, granted_at, updated_at, revoked_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, NULL)
+             ON CONFLICT(pubkey, source) DO UPDATE SET
+                note = ?3,
+                expires_at = ?4,
+                updated_at = ?5,
+                revoked_at = NULL",
+            params![pubkey, source.as_str(), note, expires_at, now],
+        )?;
+        if source == PublishGrantSource::Operator {
+            tx.execute(
+                "INSERT INTO allowed_pubkeys (pubkey, note, created_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(pubkey) DO UPDATE SET note = ?2",
+                params![pubkey, note, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn revoke_publish_access(
+        &mut self,
+        pubkey: &str,
+        source: PublishGrantSource,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        assert!(pubkey.len() == 64);
+        let tx = self.conn.transaction()?;
+        let revoked = tx.execute(
+            "UPDATE publish_grants
+             SET revoked_at = CASE WHEN ?3 >= granted_at THEN ?3 ELSE granted_at END,
+                 updated_at = CASE WHEN ?3 >= granted_at THEN ?3 ELSE granted_at END
+             WHERE pubkey = ?1 AND source = ?2 AND revoked_at IS NULL",
+            params![pubkey, source.as_str(), now],
+        )?;
+        let legacy_removed = if source == PublishGrantSource::Operator {
+            tx.execute(
+                "DELETE FROM allowed_pubkeys WHERE pubkey = ?1",
+                params![pubkey],
+            )?
+        } else {
+            0
+        };
+        tx.commit()?;
+        Ok(revoked > 0 || legacy_removed > 0)
+    }
+
+    pub fn has_publish_access(&self, pubkey: &str, now: u64) -> Result<bool, StoreError> {
         let found: Option<i64> = self
             .conn
             .query_row(
-                "SELECT 1 FROM allowed_pubkeys WHERE pubkey = ?1",
-                params![pubkey],
+                "SELECT 1
+                 FROM publish_grants
+                 WHERE pubkey = ?1
+                   AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?2)
+                 LIMIT 1",
+                params![pubkey, now],
                 |row| row.get(0),
             )
             .optional()?;
         Ok(found.is_some())
     }
 
-    pub fn list_allowed(&self) -> Result<Vec<(String, String)>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT pubkey, note FROM allowed_pubkeys ORDER BY created_at")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    pub fn list_publish_grants(&self, now: u64) -> Result<Vec<PublishGrant>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pubkey, source, note, expires_at, granted_at, updated_at
+             FROM publish_grants
+             WHERE revoked_at IS NULL
+               AND (expires_at IS NULL OR expires_at > ?1)
+             ORDER BY granted_at, pubkey, source",
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            let source_raw: String = row.get(1)?;
+            let expires_at_raw: Option<i64> = row.get(3)?;
+            let granted_at_raw: i64 = row.get(4)?;
+            let updated_at_raw: i64 = row.get(5)?;
+            let grant = PublishGrant {
+                pubkey: row.get(0)?,
+                source: PublishGrantSource::from_db(&source_raw).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+                note: row.get(2)?,
+                expires_at: expires_at_raw.map(|value| value as u64),
+                granted_at: granted_at_raw as u64,
+                updated_at: updated_at_raw as u64,
+            };
+            Ok(grant)
+        })?;
         let mut out = Vec::new();
-        // Bounded: the allowlist is operator-curated and small by nature.
+        // Bounded: the publish grant cache is operator/Core curated.
         for row in rows {
             out.push(row?);
         }
@@ -900,14 +1039,66 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_roundtrip() {
+    fn publish_grants_roundtrip_with_source_scoping() {
         let mut store = Store::open_in_memory().unwrap();
-        assert!(!store.is_pubkey_allowed(OWNER).unwrap());
-        store.allow_pubkey(OWNER, "paul", NOW).unwrap();
-        assert!(store.is_pubkey_allowed(OWNER).unwrap());
-        assert_eq!(store.list_allowed().unwrap().len(), 1);
+        assert!(!store.has_publish_access(OWNER, NOW).unwrap());
+        store
+            .grant_publish_access(OWNER, PublishGrantSource::Operator, "vip", None, NOW)
+            .unwrap();
+        assert!(store.has_publish_access(OWNER, NOW).unwrap());
+        store
+            .grant_publish_access(
+                OWNER,
+                PublishGrantSource::Operator,
+                "vip replay",
+                None,
+                NOW + 1,
+            )
+            .unwrap();
+        store
+            .grant_publish_access(
+                OWNER,
+                PublishGrantSource::Core,
+                "paid",
+                Some(NOW + 100),
+                NOW + 2,
+            )
+            .unwrap();
+        let grants = store.list_publish_grants(NOW + 3).unwrap();
+        assert_eq!(grants.len(), 2);
+        assert_eq!(grants[0].note, "vip replay");
+        assert_eq!(grants[1].source, PublishGrantSource::Core);
+        assert_eq!(grants[1].expires_at, Some(NOW + 100));
         assert!(store.disallow_pubkey(OWNER).unwrap());
-        assert!(!store.is_pubkey_allowed(OWNER).unwrap());
+        assert!(store.has_publish_access(OWNER, NOW + 4).unwrap());
+        assert!(
+            !store
+                .revoke_publish_access(OWNER, PublishGrantSource::Operator, NOW + 5)
+                .unwrap()
+        );
+        assert!(
+            store
+                .revoke_publish_access(OWNER, PublishGrantSource::Core, NOW + 6)
+                .unwrap()
+        );
+        assert!(!store.has_publish_access(OWNER, NOW + 7).unwrap());
+    }
+
+    #[test]
+    fn expired_publish_grant_fails_closed() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .grant_publish_access(
+                OWNER,
+                PublishGrantSource::Core,
+                "expired",
+                Some(NOW + 10),
+                NOW,
+            )
+            .unwrap();
+        assert!(store.has_publish_access(OWNER, NOW + 9).unwrap());
+        assert!(!store.has_publish_access(OWNER, NOW + 10).unwrap());
+        assert!(store.list_publish_grants(NOW + 10).unwrap().is_empty());
     }
 
     #[test]
@@ -1170,6 +1361,40 @@ mod tests {
             .unwrap();
         let site = store.site_by_name("hello").unwrap().unwrap();
         assert!(site.active_version_spa);
+    }
+
+    #[test]
+    fn migration_copies_legacy_allowlist_to_publish_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE allowed_pubkeys (
+                   pubkey TEXT PRIMARY KEY CHECK (length(pubkey) = 64),
+                   note TEXT NOT NULL DEFAULT '',
+                   created_at INTEGER NOT NULL
+                 );
+                 INSERT INTO allowed_pubkeys (pubkey, note, created_at)
+                 VALUES ('1111111111111111111111111111111111111111111111111111111111111111',
+                         'legacy vip',
+                         1750000000);",
+            )
+            .unwrap();
+        }
+
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            assert!(store.has_publish_access(OWNER, NOW).unwrap());
+            let grants = store.list_publish_grants(NOW).unwrap();
+            assert_eq!(grants.len(), 1);
+            assert_eq!(grants[0].source, PublishGrantSource::Operator);
+            assert_eq!(grants[0].note, "legacy vip");
+            assert!(store.disallow_pubkey(OWNER).unwrap());
+        }
+
+        let store = Store::open(&db_path).unwrap();
+        assert!(!store.has_publish_access(OWNER, NOW + 1).unwrap());
     }
 
     #[test]

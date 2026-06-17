@@ -1,8 +1,8 @@
 # Roadmap
 
-v1 (this repo, shipped): static tier, NIP-98 auth, allowlist, sharing with
-magic links, local dev loop. This document sketches what comes next so v1
-decisions stay compatible with it.
+v1 (this repo, shipped): static tier, NIP-98 auth, operator publish grants,
+sharing with magic links, local dev loop. This document sketches what comes
+next so v1 decisions stay compatible with it.
 
 ## Production deploy (tier 1 on real metal)
 
@@ -21,7 +21,8 @@ A dedicated SaaS box, separate from user agent machines:
 - Mail: Postmark or SES `Mailer` implementation.
 - Ledger items 1, 2, 4, 7 must close before this deploy.
 - Agent machines get the `fsite` binary and the publishing skill; the
-  user-key allowlist is the onboarding lever.
+  publish grant cache is the onboarding lever. Operator grants handle VIPs and
+  early migrations; Core-synced grants become the paid-entitlement path.
 
 ## Tier 2: stateful sites — SHIPPED, hardware-isolated (ADR-0014, ADR-0015)
 
@@ -69,9 +70,9 @@ a rewrite.
   stays the fast canonical host (re-uses finite-site's vendored tooling).
 - **Custom domains**: CNAME to the box + per-domain cert via Caddy
   on-demand TLS, gated on a registry check.
-- **Billing**: BTCPay (prepaid credit) for non-VIP users; NWC for
-  renewals. Replaces the allowlist as the publish gate; the allowlist
-  remains as the VIP/comp lever.
+- **Billing**: BTCPay, Stripe, or agentic payments for non-VIP users. Payments
+  mint Core-owned publish grants synced to the Sites registry; operator grants
+  remain the VIP/comp lever.
 - **Rollback**: `fsite rollback NAME` — the registry already stores
   immutable versions; this is a pointer flip plus contract questions
   (finite-site deliberately deferred it).

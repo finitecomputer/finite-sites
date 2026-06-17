@@ -16,8 +16,9 @@ substrate is now finite-owned storage behind one wildcard domain.
   versions, atomic latest-pointer flips, ETag revalidation.
 - **Nostr auth**: every registry mutation is a NIP-98-signed request. The
   user identity key claims names; a per-site workspace-held key publishes.
-- **Allowlist**: only operator-allowlisted npubs can claim/publish
-  (payments are out of scope for now).
+- **Publish grant cache**: only npubs with an active operator or Core grant can
+  claim/publish. The deployed allowlist commands manage operator grants;
+  payments/Core sync are the next source.
 - **Sharing**: per-site visibility `private` / `shared` / `public`, email
   ACLs, magic-link login, host-scoped signed cookies. Revoking an email
   takes effect on the next request.
@@ -32,9 +33,9 @@ behind the same publish API — see `docs/roadmap.md`.
 |---|---|
 | `finitesites-proto` | nostr events, NIP-98, manifests, names, limits, DTOs |
 | `finitesites-blob` | content-addressed blob storage (filesystem; Garage/S3 seam) |
-| `finitesites-store` | SQLite registry: sites, claims, versions, shares, tokens |
+| `finitesites-store` | SQLite registry: publish grants, sites, claims, versions, shares, tokens |
 | `finitesites-engine` | all decisions: claim/publish/share/view/magic links |
-| `finitesitesd` | the server: control-plane API + wildcard site serving + allowlist ops |
+| `finitesitesd` | the server: control-plane API + wildcard site serving + grant ops |
 | `fsite-cli` | agent-facing CLI (`fsite`) |
 
 ## Local quickstart
@@ -43,7 +44,7 @@ behind the same publish API — see `docs/roadmap.md`.
 # 1. run the server (data dir holds registry, blobs, cookie secret, outbox)
 cargo run -p finitesitesd -- serve --data .dev-data
 
-# 2. in another shell: create an identity and allowlist it
+# 2. in another shell: create an identity and grant publishing access
 cargo run -p fsite-cli --bin fsite -- whoami
 cargo run -p finitesitesd -- allow --data .dev-data <npub from whoami> --note me
 

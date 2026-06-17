@@ -8,13 +8,17 @@ with exactly these meanings.
 - **Site Name**: a lowercase DNS label (3–63 chars), globally unique,
   first-come, claimed before any upload. Reserved names are rejected.
 - **User Key / Owner**: the user's nostr keypair (npub). It claims names,
-  lists sites, and may change sharing. The allowlist is keyed on it.
+  lists sites, and may change sharing. The publish grant cache is keyed on it.
 - **Site Key**: a per-site nostr keypair generated in the agent workspace at
   `.finite/sites/NAME.env`, registered at claim time. It signs publishes and
   sharing changes for that one site. Never committed, never uploaded.
-- **Allowlist**: the operator-curated set of User Keys permitted to claim
-  and publish. De-allowlisting an owner stops publishing for all their
-  sites immediately. Stands in for billing in v1.
+- **Publish Grant Cache**: the local registry table deciding whether a User
+  Key may claim and publish. Operator grants stand in for billing in v1;
+  Core grants become the paid-entitlement path. If no active, unexpired grant
+  exists, claim/publish fails closed.
+- **Allowlist**: the deployed operator command surface for adding/removing
+  `operator` publish grants. De-allowlisting an owner only removes the
+  operator grant; a separate active Core grant can still allow publishing.
 - **Publish Session**: a pending upload: a validated manifest plus the set
   of blobs the server still needs. Finalizing it creates a Version.
 - **Manifest**: the list of `(path, sha256, size)` entries describing one

@@ -17,7 +17,7 @@ fmt:
 dev:
     cargo run -p finitesitesd -- serve --data .dev-data
 
-# Allowlist an npub on the dev server's data dir.
+# Add an operator publish grant on the dev server's data dir.
 allow npub note="dev":
     cargo run -p finitesitesd -- allow --data .dev-data {{npub}} --note "{{note}}"
 

@@ -213,7 +213,7 @@ async fn full_publish_share_and_view_flow() {
         assert!(!claim.already_claimed);
         assert_eq!(claim.url, format!("http://hello.{BASE_DOMAIN}:{port}/"));
 
-        // A non-allowlisted key cannot claim.
+        // A key without a publish grant cannot claim.
         let stranger_claim = serde_json::to_vec(&ClaimRequest {
             name: "intruder".into(),
             site_pubkey: "44".repeat(32),

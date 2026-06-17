@@ -91,7 +91,7 @@ fn whoami() -> Result<(), CliError> {
     println!("pubkey: {}", identity.pubkey);
     println!("file:   {}", keys::identity_path()?.display());
     println!();
-    println!("ask a finite operator to allowlist this npub before claiming sites");
+    println!("ask a finite operator to grant this npub publishing access before claiming sites");
     Ok(())
 }
 

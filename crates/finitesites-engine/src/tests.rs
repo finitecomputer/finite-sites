@@ -6,7 +6,7 @@ use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
 };
 use finitesites_proto::{ManifestFile, PublishManifest, hex};
-use finitesites_store::{SiteStatus, Store, Visibility};
+use finitesites_store::{PublishGrantSource, SiteStatus, Store, Visibility};
 
 use crate::{Engine, EngineConfig, EngineError, ViewAccess};
 
@@ -95,7 +95,7 @@ fn claim_succeeds_and_replays_idempotently() {
 }
 
 #[test]
-fn claim_rejects_unallowlisted_owner() {
+fn claim_rejects_owner_without_publish_grant() {
     let mut fx = fixture();
     let result = fx.engine.claim(OTHER_OWNER, "hello", SITE_KEY, NOW);
     assert!(matches!(result, Err(EngineError::NotAllowlisted)));
@@ -241,7 +241,7 @@ fn begin_publish_rejects_unknown_key_and_bad_manifest() {
 }
 
 #[test]
-fn begin_publish_stops_after_owner_deallowlisted() {
+fn begin_publish_stops_after_owner_grant_revoked() {
     let mut fx = fixture();
     fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
     fx.engine.store_mut().disallow_pubkey(OWNER).unwrap();
@@ -250,6 +250,32 @@ fn begin_publish_stops_after_owner_deallowlisted() {
         .engine
         .begin_publish(SITE_KEY, &manifest, false, None, NOW);
     assert!(matches!(result, Err(EngineError::NotAllowlisted)));
+}
+
+#[test]
+fn begin_publish_stops_after_publish_grant_expires() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    fx.engine.store_mut().disallow_pubkey(OWNER).unwrap();
+    fx.engine
+        .store_mut()
+        .grant_publish_access(
+            OWNER,
+            PublishGrantSource::Core,
+            "paid until cutoff",
+            Some(NOW + 10),
+            NOW + 1,
+        )
+        .unwrap();
+    let manifest = manifest_for(&[("/index.html", b"x")]);
+    fx.engine
+        .begin_publish(SITE_KEY, &manifest, false, None, NOW + 9)
+        .unwrap();
+
+    let expired = fx
+        .engine
+        .begin_publish(SITE_KEY, &manifest, false, None, NOW + 10);
+    assert!(matches!(expired, Err(EngineError::NotAllowlisted)));
 }
 
 #[test]

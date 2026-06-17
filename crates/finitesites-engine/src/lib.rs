@@ -27,7 +27,7 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
-    #[error("pubkey is not allowlisted for publishing")]
+    #[error("pubkey has no active publish grant")]
     NotAllowlisted,
     #[error("name already claimed")]
     NameTaken,
@@ -168,7 +168,7 @@ impl Engine {
 
     // ---- claims ------------------------------------------------------------
 
-    /// Claim a site name for an allowlisted owner, registering the per-site
+    /// Claim a site name for a publishing-granted owner, registering the per-site
     /// signing key. Idempotent for the same (owner, name, site key) triple.
     pub fn claim(
         &mut self,
@@ -181,7 +181,7 @@ impl Engine {
         if !hex::is_hex32(site_pubkey) {
             return Err(EngineError::Validation("site_pubkey must be 32-byte hex"));
         }
-        if !self.store.is_pubkey_allowed(owner_pubkey)? {
+        if !self.store.has_publish_access(owner_pubkey, now)? {
             return Err(EngineError::NotAllowlisted);
         }
         names::validate_site_name(name)?;
@@ -255,7 +255,7 @@ impl Engine {
         start_command: Option<&str>,
         now: u64,
     ) -> Result<BeginPublishOutcome, EngineError> {
-        let site = self.authorize_site_key(site_pubkey)?;
+        let site = self.authorize_site_key(site_pubkey, now)?;
         if let Some(command) = start_command {
             validate_start_command(command)?;
             if spa_fallback {
@@ -327,7 +327,7 @@ impl Engine {
                 "sha256 must be 64 lowercase hex chars",
             ));
         }
-        let (site, publish) = self.authorize_publish(site_pubkey, publish_id)?;
+        let (site, publish) = self.authorize_publish(site_pubkey, publish_id, now)?;
         let _ = site;
         if publish.status != PublishStatus::Pending {
             return Err(EngineError::Conflict("publish is not pending"));
@@ -363,7 +363,7 @@ impl Engine {
         publish_id: &str,
         now: u64,
     ) -> Result<FinalizeOutcome, EngineError> {
-        let (site, publish) = self.authorize_publish(site_pubkey, publish_id)?;
+        let (site, publish) = self.authorize_publish(site_pubkey, publish_id, now)?;
 
         if publish.status == PublishStatus::Finalized {
             let version_id = publish
@@ -816,7 +816,7 @@ impl Engine {
 
     // ---- internal helpers ----------------------------------------------------------
 
-    fn authorize_site_key(&self, site_pubkey: &str) -> Result<SiteRecord, EngineError> {
+    fn authorize_site_key(&self, site_pubkey: &str, now: u64) -> Result<SiteRecord, EngineError> {
         let site = self
             .store
             .site_by_site_pubkey(site_pubkey)?
@@ -824,8 +824,8 @@ impl Engine {
         if site.status == SiteStatus::Disabled || site.status == SiteStatus::Deleted {
             return Err(EngineError::Conflict("site is disabled"));
         }
-        // De-allowlisting an owner stops publishing for all of their sites.
-        if !self.store.is_pubkey_allowed(&site.owner_pubkey)? {
+        // Revoking all of an owner's grants stops publishing for their sites.
+        if !self.store.has_publish_access(&site.owner_pubkey, now)? {
             return Err(EngineError::NotAllowlisted);
         }
         Ok(site)
@@ -835,8 +835,9 @@ impl Engine {
         &self,
         site_pubkey: &str,
         publish_id: &str,
+        now: u64,
     ) -> Result<(SiteRecord, finitesites_store::PublishRecord), EngineError> {
-        let site = self.authorize_site_key(site_pubkey)?;
+        let site = self.authorize_site_key(site_pubkey, now)?;
         let publish = self
             .store
             .publish_by_id(publish_id)?

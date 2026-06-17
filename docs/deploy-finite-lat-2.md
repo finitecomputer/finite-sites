@@ -94,7 +94,7 @@ pre-DNS smoke testing, temporarily sed the unit's `--api-url` to the local
 address and restore it afterwards; once Cloudflare DNS is live, test the
 real URL from anywhere.
 
-## 4. Allowlist and runtime template
+## 4. Publish grant and runtime template
 
 ```sh
 sudo -u finite-sites finitesitesd allow --data /var/lib/finite-sites <npub> --note "paul"
