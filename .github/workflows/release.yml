@@ -19,10 +19,13 @@ jobs:
         include:
           - runs_on: ubuntu-latest
             asset_name: fsite-linux-x86_64
-          - runs_on: macos-13
-            asset_name: fsite-macos-x86_64
+            target: x86_64-unknown-linux-gnu
           - runs_on: macos-14
             asset_name: fsite-macos-aarch64
+            target: aarch64-apple-darwin
+          - runs_on: macos-14
+            asset_name: fsite-macos-x86_64
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
@@ -31,15 +34,16 @@ jobs:
         run: |
           rustup toolchain install 1.88.0 --profile minimal
           rustup default 1.88.0
+          rustup target add "${{ matrix.target }}"
 
       - name: Build fsite
-        run: cargo build --locked --release --package fsite-cli --bin fsite
+        run: cargo build --locked --release --target "${{ matrix.target }}" --package fsite-cli --bin fsite
 
       - name: Package fsite
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/fsite dist/fsite
+          cp "target/${{ matrix.target }}/release/fsite" dist/fsite
           tar -C dist -czf "${{ matrix.asset_name }}.tar.gz" fsite
           shasum -a 256 "${{ matrix.asset_name }}.tar.gz" > "${{ matrix.asset_name }}.tar.gz.sha256"
 

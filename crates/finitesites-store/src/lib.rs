@@ -1420,10 +1420,7 @@ fn publish_event_metadata(
     // Inputs are normalized before storage: pubkeys are hex and emails reject
     // quotes/backslashes/commas, so this bounded audit JSON is safe to build
     // without a JSON dependency in the store crate.
-    let mut metadata = format!(
-        "{{\"version\":{},\"has_source\":{}",
-        version_number, has_source
-    );
+    let mut metadata = format!("{{\"version\":{version_number},\"has_source\":{has_source}");
     if let Some(pubkey) = actor_pubkey {
         metadata.push_str(",\"actor_pubkey\":\"");
         metadata.push_str(pubkey);
