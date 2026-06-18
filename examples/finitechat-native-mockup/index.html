@@ -50,15 +50,60 @@
 
     .stage {
       min-height: 100vh;
-      display: grid;
-      place-items: stretch center;
-      padding: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0 0;
+    }
+
+    .preview-toolbar {
+      width: min(100vw, 430px);
+      display: flex;
+      justify-content: flex-end;
+      padding: 0 12px;
+      pointer-events: none;
+      z-index: 80;
+    }
+
+    .preview-toggle {
+      height: 38px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 14px;
+      border-radius: 19px;
+      background: var(--surface);
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      box-shadow: 0 10px 30px rgba(18, 28, 45, 0.12);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+      pointer-events: auto;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .preview-toggle[aria-pressed="true"] {
+      color: var(--blue);
+      background: rgba(255, 255, 255, 0.92);
+    }
+
+    .preview-toggle-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .preview-toggle[aria-pressed="true"] .preview-toggle-dot {
+      background: var(--blue);
     }
 
     .app-shell {
       position: relative;
       width: min(100vw, 430px);
-      min-height: 100vh;
+      min-height: calc(100vh - 58px);
       overflow: hidden;
       background: #fbfcff;
       border-left: 1px solid rgba(20, 29, 43, 0.08);
@@ -253,16 +298,8 @@
       color: #7a828f;
     }
 
-    .section-title {
-      margin: 4px 0 0;
-      padding: 8px 0 8px;
-      color: var(--muted);
-      font-size: 16px;
-      font-weight: 600;
-    }
-
     .list {
-      border-top: 1px solid var(--line);
+      border-top: 0;
     }
 
     .row {
@@ -379,7 +416,7 @@
       min-height: 380px;
       color: var(--muted);
       text-align: center;
-      border-bottom: 1px solid var(--line);
+      border-bottom: 0;
     }
 
     .empty strong {
@@ -387,6 +424,18 @@
       margin-top: 10px;
       color: var(--text);
       font-size: 20px;
+    }
+
+    .tab-empty {
+      display: none;
+    }
+
+    .app-shell.is-empty .tab-pane .list {
+      display: none;
+    }
+
+    .app-shell.is-empty .tab-pane .tab-empty {
+      display: grid;
     }
 
     .bottom-nav {
@@ -764,7 +813,7 @@
       }
 
       .app-shell {
-        min-height: min(900px, calc(100vh - 48px));
+        min-height: min(900px, calc(100vh - 96px));
         max-height: 900px;
         border-radius: 34px;
         border: 1px solid rgba(20, 29, 43, 0.1);
@@ -779,7 +828,14 @@
 </head>
 <body>
   <div class="stage">
-    <main class="app-shell" aria-label="FiniteChat native mockup">
+    <div class="preview-toolbar">
+      <button id="empty-toggle" class="preview-toggle" type="button" aria-pressed="false">
+        <span class="preview-toggle-dot" aria-hidden="true"></span>
+        <span>Empty state</span>
+      </button>
+    </div>
+
+    <main id="app-shell" class="app-shell" aria-label="FiniteChat native mockup">
       <div class="status" aria-hidden="true">
         <span>10:14</span>
         <div class="status-icons">
@@ -811,7 +867,6 @@
           </div>
 
           <div id="chats-pane" class="tab-pane">
-            <h2 class="section-title">Chats</h2>
             <div class="list" data-filterable>
               <button class="row" type="button" data-open-chat="product">
                 <span class="avatar">P<span class="presence"></span></span>
@@ -836,16 +891,21 @@
                 </span>
               </button>
             </div>
+            <div class="tab-empty empty">
+              <div>
+                <svg class="icon" viewBox="0 0 24 24" style="width: 52px; height: 52px"><path d="M7 15h8"/><path d="M7 11h10"/><path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-7a8 8 0 0 1 8-12h2a8 8 0 0 1 8 8Z"/></svg>
+                <strong>No chats yet</strong>
+              </div>
+            </div>
           </div>
 
           <div id="people-pane" class="tab-pane" hidden>
-            <h2 class="section-title">People</h2>
             <div class="list" data-filterable>
               <button class="row" type="button" data-person="skyler">
                 <span class="avatar people">S<span class="presence"></span></span>
                 <span class="row-main">
                   <span class="row-top"><span class="row-title">Skyler Miller</span><span class="row-meta">npub1...4q7p</span></span>
-                  <span class="row-subtitle">Finite profile from follows</span>
+                  <span class="row-subtitle">Finite profile from Nostr</span>
                 </span>
               </button>
               <button class="row" type="button" data-person="paul">
@@ -863,10 +923,15 @@
                 </span>
               </button>
             </div>
+            <div class="tab-empty empty">
+              <div>
+                <svg class="icon" viewBox="0 0 24 24" style="width: 52px; height: 52px"><path d="M16 11a4 4 0 1 0-8 0"/><path d="M3 21a7 7 0 0 1 14 0"/><path d="M17 8a3 3 0 0 1 4 3"/><path d="M18 21a5 5 0 0 0-3-4.6"/></svg>
+                <strong>No people yet</strong>
+              </div>
+            </div>
           </div>
 
           <div id="agents-pane" class="tab-pane" hidden>
-            <h2 class="section-title">Agent Chats</h2>
             <div class="list" data-filterable>
               <button class="row" type="button" data-open-chat="hermes">
                 <span class="avatar agent">H<span class="presence"></span></span>
@@ -883,6 +948,12 @@
                   <span class="row-subtitle">Collects open questions from app testing.</span>
                 </span>
               </button>
+            </div>
+            <div class="tab-empty empty">
+              <div>
+                <svg class="icon" viewBox="0 0 24 24" style="width: 52px; height: 52px"><path d="M12 3 9.8 8.6 4 11l5.8 2.4L12 19l2.2-5.6L20 11l-5.8-2.4Z"/><path d="m18 3 .8 2.2L21 6l-2.2.8L18 9l-.8-2.2L15 6l2.2-.8Z"/></svg>
+                <strong>No agents yet</strong>
+              </div>
             </div>
           </div>
         </div>
@@ -1069,7 +1140,10 @@
     };
 
     let activeTab = "chats";
+    let emptyMode = false;
     let cameraStream = null;
+    const appShell = document.getElementById("app-shell");
+    const emptyToggle = document.getElementById("empty-toggle");
     const search = document.getElementById("search");
     const toast = document.getElementById("toast");
 
@@ -1090,6 +1164,12 @@
         button.classList.toggle("is-active", button.dataset.tab === tab);
       });
       filterRows("");
+    }
+
+    function setEmptyMode(nextEmptyMode) {
+      emptyMode = nextEmptyMode;
+      appShell.classList.toggle("is-empty", emptyMode);
+      emptyToggle.setAttribute("aria-pressed", String(emptyMode));
     }
 
     function filterRows(value) {
@@ -1154,6 +1234,8 @@
     document.querySelectorAll("[data-tab]").forEach((button) => {
       button.addEventListener("click", () => setTab(button.dataset.tab));
     });
+
+    emptyToggle.addEventListener("click", () => setEmptyMode(!emptyMode));
 
     document.querySelectorAll("[data-sheet]").forEach((button) => {
       button.addEventListener("click", () => openSheet(button.dataset.sheet));
