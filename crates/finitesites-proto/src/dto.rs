@@ -11,6 +11,9 @@ pub struct ClaimRequest {
     pub name: String,
     /// X-only pubkey hex of the per-site workspace-held signing key.
     pub site_pubkey: String,
+    /// Optional human-facing owner email for email-keyed publishing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +24,21 @@ pub struct ClaimResponse {
     pub status: String,
     /// True when this claim already existed for the same owner + site key.
     pub already_claimed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceSnapshotRequest {
+    pub sha256: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceSnapshotInfo {
+    pub version_number: u32,
+    pub sha256: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +53,13 @@ pub struct PublishBeginRequest {
     /// one entry, the `/app.tar.gz` bundle. `None` means a static publish.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_command: Option<String>,
+    /// Email identity for email-keyed publishing. When omitted, the signer
+    /// must be the Site Key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_email: Option<String>,
+    /// Optional source archive attached to the finalized version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceSnapshotRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +76,53 @@ pub struct PublishFinalizeResponse {
     pub url: String,
     pub path_count: u32,
     pub total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceSnapshotInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailLoginRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailLoginResponse {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailRedeemRequest {
+    pub email: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmailRedeemResponse {
+    pub email: String,
+    pub pubkey: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerEmailRequest {
+    pub owner_email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorsRequest {
+    /// Email identity for email-keyed owner actions. When omitted, the signer
+    /// must be the Owner User Key or Site Key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_email: Option<String>,
+    #[serde(default)]
+    pub add_emails: Vec<String>,
+    #[serde(default)]
+    pub remove_emails: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditorsResponse {
+    pub owner_email: Option<String>,
+    pub editor_emails: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,8 +156,14 @@ pub struct SiteSummary {
     /// "static" or "app". Defaulted for wire-compat with older peers.
     #[serde(default)]
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_email: Option<String>,
     pub active_version: Option<u32>,
     pub shared_emails: Vec<String>,
+    #[serde(default)]
+    pub editor_emails: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceSnapshotInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

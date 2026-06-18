@@ -16,16 +16,18 @@
 mod api;
 mod bundle;
 mod keys;
+mod source;
 mod walk;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use sha2::Digest as _;
 use thiserror::Error;
 
-use finitesites_proto::dto::SharingRequest;
+use finitesites_proto::dto::{EditorsRequest, SharingRequest, SourceSnapshotRequest};
 use finitesites_proto::limits::MAX_EMAILS_PER_SHARING_REQUEST;
-use finitesites_proto::npub;
+use finitesites_proto::{hex, npub};
 
 #[derive(Debug, Error)]
 pub enum CliError {
@@ -58,12 +60,16 @@ fn run(args: &[String]) -> Result<(), CliError> {
     };
     match command.as_str() {
         "whoami" => whoami(),
+        "email-login" => email_login(&args[1..]),
+        "email-redeem" => email_redeem(&args[1..]),
         "claim" => claim(&args[1..]),
         "publish" => publish(&args[1..]),
         "publish-app" => publish_app(&args[1..]),
         "status" => status(&args[1..]),
         "list" => list(),
         "share" => share(&args[1..]),
+        "editors" => editors(&args[1..]),
+        "source" => source_command(&args[1..]),
         "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -76,10 +82,14 @@ fn run(args: &[String]) -> Result<(), CliError> {
 }
 
 fn usage() -> String {
-    "usage:\n  fsite whoami\n  fsite claim NAME\n  fsite publish NAME PATH [--spa]\n  \
+    "usage:\n  fsite whoami\n  fsite email-login EMAIL\n  \
+     fsite email-redeem EMAIL TOKEN\n  fsite claim NAME [--owner-email EMAIL]\n  \
+     fsite publish NAME PATH [--spa] [--source PATH] [--owner-email EMAIL] [--email EMAIL]\n  \
      fsite publish-app NAME PATH --start \"CMD\"\n  \
      fsite status NAME\n  fsite list\n  fsite share NAME [--shared|--private] \
-     [--public --yes-public] [--add-email EMAIL]... [--remove-email EMAIL]..."
+     [--public --yes-public] [--add-email EMAIL]... [--remove-email EMAIL]...\n  \
+     fsite editors NAME [--email OWNER_EMAIL] [--add-email EMAIL]... [--remove-email EMAIL]...\n  \
+     fsite source pull NAME PATH [--email EMAIL]"
         .to_string()
 }
 
@@ -95,14 +105,64 @@ fn whoami() -> Result<(), CliError> {
     Ok(())
 }
 
+fn email_login(args: &[String]) -> Result<(), CliError> {
+    let [email] = args else {
+        return Err(CliError::Usage(
+            "usage: fsite email-login EMAIL".to_string(),
+        ));
+    };
+    let client = api::Client::from_env();
+    let response = client.request_email_login(email)?;
+    println!("sent email login for {}", response.email);
+    println!("run the fsite email-redeem command from the email to verify this machine");
+    Ok(())
+}
+
+fn email_redeem(args: &[String]) -> Result<(), CliError> {
+    let [email, token] = args else {
+        return Err(CliError::Usage(
+            "usage: fsite email-redeem EMAIL TOKEN".to_string(),
+        ));
+    };
+    let key = keys::load_or_create_email_key(email)?;
+    let client = api::Client::from_env();
+    let response = client.redeem_email_login(&key, email, token)?;
+    println!("verified {} for publishing", response.email);
+    Ok(())
+}
+
 fn claim(args: &[String]) -> Result<(), CliError> {
-    let [name] = args else {
-        return Err(CliError::Usage("usage: fsite claim NAME".to_string()));
+    let mut positionals: Vec<&String> = Vec::new();
+    let mut owner_email: Option<String> = None;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--owner-email" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--owner-email needs a value".to_string()))?;
+                owner_email = Some(value.clone());
+                index += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            _ => {
+                positionals.push(&args[index]);
+                index += 1;
+            }
+        }
+    }
+    let [name] = positionals.as_slice() else {
+        return Err(CliError::Usage(
+            "usage: fsite claim NAME [--owner-email EMAIL]".to_string(),
+        ));
     };
     let identity = keys::load_or_create_identity()?;
     let site_key = keys::load_or_create_site_key(name)?;
     let client = api::Client::from_env();
-    let response = client.claim(&identity, name, &site_key.pubkey)?;
+    let response = client.claim(&identity, name, &site_key.pubkey, owner_email.as_deref())?;
     if response.already_claimed {
         println!("{} was already yours", response.name);
     } else {
@@ -113,27 +173,79 @@ fn claim(args: &[String]) -> Result<(), CliError> {
         "status: {} (publish with: fsite publish {} PATH)",
         response.status, response.name
     );
+    if let Some(email) = response.owner_email {
+        println!("owner:  {email}");
+    }
     Ok(())
 }
 
 fn publish(args: &[String]) -> Result<(), CliError> {
-    let (positionals, flags): (Vec<&String>, Vec<&String>) =
-        args.iter().partition(|arg| !arg.starts_with("--"));
     let mut spa = false;
+    let mut actor_email: Option<String> = None;
+    let mut owner_email: Option<String> = None;
+    let mut source_path: Option<String> = None;
+    let mut positionals: Vec<&String> = Vec::new();
+    let mut index: usize = 0;
     // Bounded by argv length.
-    for flag in flags {
-        match flag.as_str() {
-            "--spa" => spa = true,
-            other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
+    while index < args.len() {
+        match args[index].as_str() {
+            "--spa" => {
+                spa = true;
+                index += 1;
+            }
+            "--email" | "--owner-email" | "--source" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage(format!("{} needs a value", args[index])))?;
+                match args[index].as_str() {
+                    "--email" => actor_email = Some(value.clone()),
+                    "--owner-email" => owner_email = Some(value.clone()),
+                    "--source" => source_path = Some(value.clone()),
+                    _ => unreachable!(),
+                }
+                index += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            _ => {
+                positionals.push(&args[index]);
+                index += 1;
+            }
         }
     }
     let [name, path] = positionals.as_slice() else {
         return Err(CliError::Usage(
-            "usage: fsite publish NAME PATH [--spa]".to_string(),
+            "usage: fsite publish NAME PATH [--spa] [--source PATH] \
+             [--owner-email EMAIL] [--email EMAIL]"
+                .to_string(),
         ));
     };
-    let site_key = keys::load_site_key(name)?;
+    if owner_email.is_some() && actor_email.is_some() {
+        return Err(CliError::Usage(
+            "--owner-email requires the site key; do not combine it with --email".to_string(),
+        ));
+    }
+    let client = api::Client::from_env();
+    if let Some(email) = owner_email.as_deref() {
+        ensure_claimed_with_owner_email(&client, name, email)?;
+    }
+    let actor_key = match actor_email.as_deref() {
+        Some(email) => keys::load_or_create_email_key(email)?,
+        None => keys::load_site_key(name)?,
+    };
     let outcome = walk::build_manifest(&PathBuf::from(path))?;
+    let source_bytes = match source_path.as_deref() {
+        Some(path) => {
+            eprintln!("building source snapshot from {path} ...");
+            Some(source::build_source_snapshot(&PathBuf::from(path))?)
+        }
+        None => None,
+    };
+    let source_request = source_bytes.as_ref().map(|bytes| SourceSnapshotRequest {
+        sha256: hex::encode(&sha2::Sha256::digest(bytes)),
+        size: bytes.len() as u64,
+    });
     if outcome.skipped_hidden > 0 {
         eprintln!(
             "skipped {} hidden file(s)/folder(s)",
@@ -141,8 +253,14 @@ fn publish(args: &[String]) -> Result<(), CliError> {
         );
     }
 
-    let client = api::Client::from_env();
-    let begun = client.begin_publish(&site_key, name, &outcome.manifest, spa)?;
+    let begun = client.begin_publish(
+        &actor_key,
+        name,
+        &outcome.manifest,
+        spa,
+        actor_email.as_deref(),
+        source_request.as_ref(),
+    )?;
     let total = outcome.manifest.files.len();
     let to_upload = begun.missing.len();
     eprintln!(
@@ -153,25 +271,52 @@ fn publish(args: &[String]) -> Result<(), CliError> {
 
     // Bounded by MAX_MANIFEST_FILES via manifest validation.
     for (index, sha256) in begun.missing.iter().enumerate() {
-        let source = outcome
+        if let (Some(request), Some(bytes)) = (source_request.as_ref(), source_bytes.as_ref())
+            && sha256 == &request.sha256
+        {
+            client.upload_blob(&actor_key, &begun.publish_id, sha256, bytes)?;
+            eprintln!("uploaded {}/{to_upload} source snapshot", index + 1);
+            continue;
+        }
+        let file_source = outcome
             .sources
             .get(sha256)
             .ok_or_else(|| CliError::Api(format!("server asked for unknown blob {sha256}")))?;
-        let bytes = std::fs::read(source)
-            .map_err(|error| CliError::Io(format!("cannot read {}: {error}", source.display())))?;
-        client.upload_blob(&site_key, &begun.publish_id, sha256, &bytes)?;
-        eprintln!("uploaded {}/{to_upload} {}", index + 1, source.display());
+        let bytes = std::fs::read(file_source).map_err(|error| {
+            CliError::Io(format!("cannot read {}: {error}", file_source.display()))
+        })?;
+        client.upload_blob(&actor_key, &begun.publish_id, sha256, &bytes)?;
+        eprintln!(
+            "uploaded {}/{to_upload} {}",
+            index + 1,
+            file_source.display()
+        );
     }
 
-    let finalized = client.finalize_publish(&site_key, &begun.publish_id)?;
+    let finalized = client.finalize_publish(&actor_key, &begun.publish_id)?;
     println!("published {name} version {}", finalized.version_number);
     println!(
         "{} file(s), {} bytes",
         finalized.path_count, finalized.total_bytes
     );
     println!("url: {}", finalized.url);
+    if finalized.source.is_some() {
+        println!("source: attached");
+    }
     println!();
     println!("the site is PRIVATE by default; use `fsite share {name} ...` to share it");
+    Ok(())
+}
+
+fn ensure_claimed_with_owner_email(
+    client: &api::Client,
+    name: &str,
+    owner_email: &str,
+) -> Result<(), CliError> {
+    let identity = keys::load_or_create_identity()?;
+    let site_key = keys::load_or_create_site_key(name)?;
+    client.claim(&identity, name, &site_key.pubkey, Some(owner_email))?;
+    client.set_owner_email(&site_key, name, owner_email)?;
     Ok(())
 }
 
@@ -369,6 +514,128 @@ fn share(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
+fn editors(args: &[String]) -> Result<(), CliError> {
+    let Some((name, flags)) = args.split_first() else {
+        return Err(CliError::Usage(
+            "usage: fsite editors NAME [--email OWNER_EMAIL] \
+             [--add-email EMAIL]... [--remove-email EMAIL]..."
+                .to_string(),
+        ));
+    };
+    let mut add_emails: Vec<String> = Vec::new();
+    let mut remove_emails: Vec<String> = Vec::new();
+    let mut actor_email: Option<String> = None;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--email" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
+                actor_email = Some(value.clone());
+                index += 2;
+            }
+            "--add-email" | "--remove-email" => {
+                let value = flags
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage(format!("{} needs a value", flags[index])))?;
+                if flags[index] == "--add-email" {
+                    add_emails.push(value.clone());
+                } else {
+                    remove_emails.push(value.clone());
+                }
+                index += 2;
+            }
+            other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
+        }
+    }
+    if add_emails.len() + remove_emails.len() > MAX_EMAILS_PER_SHARING_REQUEST as usize {
+        return Err(CliError::Usage(format!(
+            "at most {MAX_EMAILS_PER_SHARING_REQUEST} email changes per command"
+        )));
+    }
+    let key = match actor_email.as_deref() {
+        Some(email) => keys::load_or_create_email_key(email)?,
+        None => actor_key_for(name)?,
+    };
+    let client = api::Client::from_env();
+    let response = if add_emails.is_empty() && remove_emails.is_empty() {
+        client.list_editors(&key, name, actor_email.as_deref())?
+    } else {
+        client.update_editors(
+            &key,
+            name,
+            &EditorsRequest {
+                actor_email: actor_email.clone(),
+                add_emails,
+                remove_emails,
+            },
+        )?
+    };
+    match response.owner_email {
+        Some(email) => println!("owner:   {email}"),
+        None => println!("owner:   unset"),
+    }
+    if response.editor_emails.is_empty() {
+        println!("editors: nobody");
+    } else {
+        println!("editors: {}", response.editor_emails.join(", "));
+    }
+    Ok(())
+}
+
+fn source_command(args: &[String]) -> Result<(), CliError> {
+    let Some((subcommand, rest)) = args.split_first() else {
+        return Err(CliError::Usage(
+            "usage: fsite source pull NAME PATH [--email EMAIL]".to_string(),
+        ));
+    };
+    match subcommand.as_str() {
+        "pull" => source_pull(rest),
+        other => Err(CliError::Usage(format!("unknown source command `{other}`"))),
+    }
+}
+
+fn source_pull(args: &[String]) -> Result<(), CliError> {
+    let mut positionals: Vec<&String> = Vec::new();
+    let mut actor_email: Option<String> = None;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--email" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
+                actor_email = Some(value.clone());
+                index += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            _ => {
+                positionals.push(&args[index]);
+                index += 1;
+            }
+        }
+    }
+    let [name, target] = positionals.as_slice() else {
+        return Err(CliError::Usage(
+            "usage: fsite source pull NAME PATH [--email EMAIL]".to_string(),
+        ));
+    };
+    let key = match actor_email.as_deref() {
+        Some(email) => keys::load_or_create_email_key(email)?,
+        None => actor_key_for(name)?,
+    };
+    let client = api::Client::from_env();
+    let bytes = client.source_snapshot(&key, name, actor_email.as_deref())?;
+    source::extract_source_snapshot(&bytes, &PathBuf::from(target))?;
+    println!("pulled source for {name} into {target}");
+    Ok(())
+}
+
 fn print_summary(summary: &finitesites_proto::dto::SiteSummary) {
     println!("name:       {}", summary.name);
     println!("url:        {}", summary.url);
@@ -379,8 +646,17 @@ fn print_summary(summary: &finitesites_proto::dto::SiteSummary) {
         Some(version) => println!("version:    v{version}"),
         None => println!("version:    unpublished"),
     }
+    if let Some(email) = &summary.owner_email {
+        println!("owner:      {email}");
+    }
     if !summary.shared_emails.is_empty() {
         println!("shared:     {}", summary.shared_emails.join(", "));
+    }
+    if !summary.editor_emails.is_empty() {
+        println!("editors:    {}", summary.editor_emails.join(", "));
+    }
+    if let Some(source) = &summary.source {
+        println!("source:     v{} {}", source.version_number, source.sha256);
     }
 }
 

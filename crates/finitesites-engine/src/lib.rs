@@ -13,15 +13,20 @@ pub use email::validate_email;
 use thiserror::Error;
 
 use finitesites_blob::{BlobError, BlobStore};
-use finitesites_proto::dto::{SharingRequest, SharingResponse, SiteSummary};
+use finitesites_proto::dto::{
+    EditorsRequest, EditorsResponse, SharingRequest, SharingResponse, SiteSummary,
+    SourceSnapshotInfo, SourceSnapshotRequest,
+};
 use finitesites_proto::limits::{
-    LOGIN_TOKEN_TTL_SECONDS, MAX_APP_BUNDLE_BYTES, MAX_EMAILS_PER_SHARING_REQUEST, MAX_FILE_BYTES,
-    MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER, MAX_START_COMMAND_BYTES, VIEWER_COOKIE_TTL_SECONDS,
+    LOGIN_TOKEN_TTL_SECONDS, MAX_APP_BUNDLE_BYTES, MAX_EDITORS_PER_SITE, MAX_EMAIL_KEYS_PER_EMAIL,
+    MAX_EMAILS_PER_SHARING_REQUEST, MAX_FILE_BYTES, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
+    MAX_SOURCE_SNAPSHOT_BYTES, MAX_START_COMMAND_BYTES, VIEWER_COOKIE_TTL_SECONDS,
 };
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::{ProtoError, PublishManifest, hex, ids, names};
 use finitesites_store::{
-    PublishStatus, SiteKind, SiteRecord, SiteStatus, Store, StoreError, Visibility,
+    PublishRecord, PublishStatus, SiteKind, SiteRecord, SiteStatus, SourceSnapshotRecord, Store,
+    StoreError, Visibility,
 };
 use sha2::{Digest, Sha256};
 
@@ -41,6 +46,10 @@ pub enum EngineError {
     TooManySites,
     #[error("too many shared emails for this site")]
     TooManyShares,
+    #[error("too many editors for this site")]
+    TooManyEditors,
+    #[error("too many active keys for this email")]
+    TooManyEmailKeys,
     #[error("validation failed: {0}")]
     Validation(&'static str),
     #[error("conflict: {0}")]
@@ -98,8 +107,23 @@ pub struct FinalizeOutcome {
     pub version_number: u32,
     pub path_count: u32,
     pub total_bytes: u64,
+    pub source: Option<SourceSnapshotInfo>,
     /// Set for app sites: what the supervisor needs to (re)deploy.
     pub app: Option<AppDeploy>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmailLoginToken {
+    pub email: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceSnapshotDownload {
+    pub version_number: u32,
+    pub sha256: String,
+    pub size: u64,
+    pub bytes: Vec<u8>,
 }
 
 /// Everything the app supervisor needs to deploy one finalized version.
@@ -158,6 +182,10 @@ impl Engine {
         }
     }
 
+    pub fn site_url(&self, name: &str) -> String {
+        self.config.site_url(name)
+    }
+
     pub fn config(&self) -> &EngineConfig {
         &self.config
     }
@@ -177,10 +205,25 @@ impl Engine {
         site_pubkey: &str,
         now: u64,
     ) -> Result<ClaimOutcome, EngineError> {
+        self.claim_with_owner_email(owner_pubkey, name, site_pubkey, None, now)
+    }
+
+    pub fn claim_with_owner_email(
+        &mut self,
+        owner_pubkey: &str,
+        name: &str,
+        site_pubkey: &str,
+        owner_email: Option<&str>,
+        now: u64,
+    ) -> Result<ClaimOutcome, EngineError> {
         assert!(hex::is_hex32(owner_pubkey));
         if !hex::is_hex32(site_pubkey) {
             return Err(EngineError::Validation("site_pubkey must be 32-byte hex"));
         }
+        let normalized_owner_email = match owner_email {
+            Some(email) => Some(validate_email(email)?),
+            None => None,
+        };
         if !self.store.has_publish_access(owner_pubkey, now)? {
             return Err(EngineError::NotAllowlisted);
         }
@@ -190,9 +233,18 @@ impl Engine {
             let same_owner_and_key =
                 existing.owner_pubkey == owner_pubkey && existing.site_pubkey == site_pubkey;
             if same_owner_and_key {
+                if let Some(email) = normalized_owner_email.as_deref() {
+                    self.set_owner_email_for_site(&existing, owner_pubkey, email, now)?;
+                }
+                let refreshed =
+                    self.store
+                        .site_by_id(&existing.id)?
+                        .ok_or(StoreError::CorruptState(
+                            "claimed site missing after owner email update",
+                        ))?;
                 let url = self.config.site_url(name);
                 return Ok(ClaimOutcome {
-                    site: existing,
+                    site: refreshed,
                     url,
                     already_claimed: true,
                 });
@@ -212,12 +264,13 @@ impl Engine {
 
         let site_id = ids::new_id(ids::SITE_ID_PREFIX);
         let claim_id = ids::new_id(ids::CLAIM_ID_PREFIX);
-        let created = self.store.create_site_with_claim(
+        let created = self.store.create_site_with_claim_and_owner_email(
             &site_id,
             &claim_id,
             name,
             owner_pubkey,
             site_pubkey,
+            normalized_owner_email.as_deref(),
             now,
         );
         match created {
@@ -242,6 +295,29 @@ impl Engine {
         })
     }
 
+    fn set_owner_email_for_site(
+        &mut self,
+        site: &SiteRecord,
+        actor_pubkey: &str,
+        owner_email: &str,
+        now: u64,
+    ) -> Result<(), EngineError> {
+        if actor_pubkey != site.owner_pubkey && actor_pubkey != site.site_pubkey {
+            return Err(EngineError::NotAuthorized);
+        }
+        match site.owner_email.as_deref() {
+            Some(existing) if existing != owner_email => {
+                return Err(EngineError::Conflict("owner email already set"));
+            }
+            Some(_) => return Ok(()),
+            None => {}
+        }
+        self.store.set_owner_email(&site.id, owner_email, now)?;
+        self.store
+            .record_event(Some(&site.id), "owner_email_set", Some(actor_pubkey), now)?;
+        Ok(())
+    }
+
     // ---- publishing ----------------------------------------------------------
 
     /// Start a publish session: validate the manifest and report which blobs
@@ -255,7 +331,79 @@ impl Engine {
         start_command: Option<&str>,
         now: u64,
     ) -> Result<BeginPublishOutcome, EngineError> {
+        self.begin_publish_with_source(
+            site_pubkey,
+            manifest,
+            spa_fallback,
+            start_command,
+            None,
+            now,
+        )
+    }
+
+    pub fn begin_publish_with_source(
+        &mut self,
+        site_pubkey: &str,
+        manifest: &PublishManifest,
+        spa_fallback: bool,
+        start_command: Option<&str>,
+        source: Option<&SourceSnapshotRequest>,
+        now: u64,
+    ) -> Result<BeginPublishOutcome, EngineError> {
         let site = self.authorize_site_key(site_pubkey, now)?;
+        self.begin_publish_for_site(
+            &site,
+            site_pubkey,
+            None,
+            manifest,
+            spa_fallback,
+            start_command,
+            source,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_publish_as_email(
+        &mut self,
+        actor_pubkey: &str,
+        actor_email: &str,
+        name: &str,
+        manifest: &PublishManifest,
+        spa_fallback: bool,
+        start_command: Option<&str>,
+        source: Option<&SourceSnapshotRequest>,
+        now: u64,
+    ) -> Result<BeginPublishOutcome, EngineError> {
+        let (site, email) = self.authorize_email_publish(name, actor_pubkey, actor_email, now)?;
+        self.begin_publish_for_site(
+            &site,
+            actor_pubkey,
+            Some(&email),
+            manifest,
+            spa_fallback,
+            start_command,
+            source,
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_publish_for_site(
+        &mut self,
+        site: &SiteRecord,
+        actor_pubkey: &str,
+        actor_email: Option<&str>,
+        manifest: &PublishManifest,
+        spa_fallback: bool,
+        start_command: Option<&str>,
+        source: Option<&SourceSnapshotRequest>,
+        now: u64,
+    ) -> Result<BeginPublishOutcome, EngineError> {
+        let source_record = match source {
+            Some(source) => Some(validate_source_snapshot(source)?),
+            None => None,
+        };
         if let Some(command) = start_command {
             validate_start_command(command)?;
             if spa_fallback {
@@ -296,17 +444,23 @@ impl Engine {
         }
 
         let publish_id = ids::new_id(ids::PUBLISH_ID_PREFIX);
-        self.store.create_publish(
+        self.store.create_publish_with_actor(
             &publish_id,
             &site.id,
             &manifest.files,
             spa_fallback,
             start_command,
+            Some(actor_pubkey),
+            actor_email,
+            source_record.as_ref(),
             now,
         )?;
-        let hashes: Vec<&str> = manifest.files.iter().map(|f| f.sha256.as_str()).collect();
+        let mut hashes: Vec<&str> = manifest.files.iter().map(|f| f.sha256.as_str()).collect();
+        if let Some(source) = source_record.as_ref() {
+            hashes.push(source.sha256.as_str());
+        }
         let missing = self.store.missing_blobs(&hashes)?;
-        assert!(missing.len() <= manifest.files.len());
+        assert!(missing.len() <= hashes.len());
         Ok(BeginPublishOutcome {
             publish_id,
             missing,
@@ -322,27 +476,46 @@ impl Engine {
         bytes: &[u8],
         now: u64,
     ) -> Result<(), EngineError> {
+        self.upload_blob_as_actor(site_pubkey, publish_id, sha256, bytes, now)
+    }
+
+    pub fn upload_blob_as_actor(
+        &mut self,
+        actor_pubkey: &str,
+        publish_id: &str,
+        sha256: &str,
+        bytes: &[u8],
+        now: u64,
+    ) -> Result<(), EngineError> {
         if !hex::is_hex32(sha256) {
             return Err(EngineError::Validation(
                 "sha256 must be 64 lowercase hex chars",
             ));
         }
-        let (site, publish) = self.authorize_publish(site_pubkey, publish_id, now)?;
-        let _ = site;
+        let (_site, publish) = self.authorize_publish_actor(actor_pubkey, publish_id, now)?;
         if publish.status != PublishStatus::Pending {
             return Err(EngineError::Conflict("publish is not pending"));
         }
-        let expected_size = self
-            .store
-            .publish_file_by_hash(publish_id, sha256)?
-            .ok_or(EngineError::Validation("blob is not part of this publish"))?;
+        let expected_size = match self.store.publish_file_by_hash(publish_id, sha256)? {
+            Some(size) => size,
+            None => self
+                .store
+                .publish_source_by_hash(publish_id, sha256)?
+                .ok_or(EngineError::Validation("blob is not part of this publish"))?,
+        };
         if bytes.len() as u64 != expected_size {
             return Err(EngineError::Validation("blob size does not match manifest"));
         }
 
         // App bundles are the one blob class allowed past the static file
         // ceiling; everything else keeps the 25 MiB cap.
-        let max_bytes = if expected_size > finitesites_proto::limits::MAX_FILE_BYTES {
+        let is_source_blob = self
+            .store
+            .publish_source_by_hash(publish_id, sha256)?
+            .is_some();
+        let max_bytes = if is_source_blob {
+            MAX_SOURCE_SNAPSHOT_BYTES
+        } else if expected_size > finitesites_proto::limits::MAX_FILE_BYTES {
             MAX_APP_BUNDLE_BYTES
         } else {
             MAX_FILE_BYTES
@@ -363,7 +536,16 @@ impl Engine {
         publish_id: &str,
         now: u64,
     ) -> Result<FinalizeOutcome, EngineError> {
-        let (site, publish) = self.authorize_publish(site_pubkey, publish_id, now)?;
+        self.finalize_publish_as_actor(site_pubkey, publish_id, now)
+    }
+
+    pub fn finalize_publish_as_actor(
+        &mut self,
+        actor_pubkey: &str,
+        publish_id: &str,
+        now: u64,
+    ) -> Result<FinalizeOutcome, EngineError> {
+        let (site, publish) = self.authorize_publish_actor(actor_pubkey, publish_id, now)?;
 
         if publish.status == PublishStatus::Finalized {
             let version_id = publish
@@ -382,6 +564,7 @@ impl Engine {
                 version.version_number,
                 version.path_count,
                 version.total_bytes,
+                version.source,
             );
         }
         if publish.status == PublishStatus::Aborted {
@@ -401,6 +584,9 @@ impl Engine {
                 Err(StoreError::Conflict("publish has missing blobs")) => {
                     return Err(EngineError::Conflict("publish has missing blobs"));
                 }
+                Err(StoreError::Conflict("publish has missing source blob")) => {
+                    return Err(EngineError::Conflict("publish has missing source blob"));
+                }
                 Err(other) => return Err(other.into()),
             };
         assert!(finalized.version_number >= 1);
@@ -410,6 +596,7 @@ impl Engine {
             finalized.version_number,
             finalized.path_count,
             finalized.total_bytes,
+            finalized.source,
         )
     }
 
@@ -422,6 +609,7 @@ impl Engine {
         version_number: u32,
         path_count: u32,
         total_bytes: u64,
+        source: Option<SourceSnapshotRecord>,
     ) -> Result<FinalizeOutcome, EngineError> {
         let site = self
             .store
@@ -456,6 +644,11 @@ impl Engine {
             version_number,
             path_count,
             total_bytes,
+            source: source.map(|source| SourceSnapshotInfo {
+                version_number,
+                sha256: source.sha256,
+                size: source.size,
+            }),
             app,
         })
     }
@@ -531,6 +724,179 @@ impl Engine {
         })
     }
 
+    // ---- email-keyed publishing ------------------------------------------
+
+    pub fn request_email_login(
+        &mut self,
+        email: &str,
+        now: u64,
+    ) -> Result<EmailLoginToken, EngineError> {
+        let normalized = validate_email(email)?;
+        let token = hex::encode(&ids::random_32());
+        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
+        self.store.create_email_login_token(
+            &token_hash,
+            &normalized,
+            now + LOGIN_TOKEN_TTL_SECONDS,
+            now,
+        )?;
+        Ok(EmailLoginToken {
+            email: normalized,
+            token,
+        })
+    }
+
+    pub fn redeem_email_login(
+        &mut self,
+        actor_pubkey: &str,
+        email: &str,
+        token: &str,
+        now: u64,
+    ) -> Result<String, EngineError> {
+        if !hex::is_hex32(actor_pubkey) {
+            return Err(EngineError::NotAuthorized);
+        }
+        if !hex::is_hex32(token) {
+            return Err(EngineError::Validation("malformed token"));
+        }
+        let normalized = validate_email(email)?;
+        let token_hash = hex::encode(&Sha256::digest(token.as_bytes()));
+        let token_email = match self.store.redeem_email_login_token(&token_hash, now) {
+            Ok(email) => email,
+            Err(StoreError::NotFound(_)) => {
+                return Err(EngineError::Validation("unknown or expired email token"));
+            }
+            Err(StoreError::Conflict(_)) => {
+                return Err(EngineError::Validation("unknown or expired email token"));
+            }
+            Err(other) => return Err(other.into()),
+        };
+        if token_email != normalized {
+            return Err(EngineError::Validation("email token does not match email"));
+        }
+        let already_present = self.store.has_email_key(&normalized, actor_pubkey)?;
+        if !already_present && self.store.count_email_keys(&normalized)? >= MAX_EMAIL_KEYS_PER_EMAIL
+        {
+            return Err(EngineError::TooManyEmailKeys);
+        }
+        self.store.add_email_key(&normalized, actor_pubkey, now)?;
+        Ok(normalized)
+    }
+
+    pub fn set_owner_email(
+        &mut self,
+        actor_pubkey: &str,
+        name: &str,
+        owner_email: &str,
+        now: u64,
+    ) -> Result<EditorsResponse, EngineError> {
+        let normalized = validate_email(owner_email)?;
+        let site = self
+            .store
+            .site_by_name(name)?
+            .ok_or(EngineError::SiteNotFound)?;
+        self.set_owner_email_for_site(&site, actor_pubkey, &normalized, now)?;
+        let refreshed = self
+            .store
+            .site_by_id(&site.id)?
+            .ok_or(StoreError::CorruptState(
+                "site missing after owner email update",
+            ))?;
+        Ok(EditorsResponse {
+            owner_email: refreshed.owner_email,
+            editor_emails: self.store.editors(&site.id)?,
+        })
+    }
+
+    pub fn update_editors(
+        &mut self,
+        actor_pubkey: &str,
+        name: &str,
+        request: &EditorsRequest,
+        now: u64,
+    ) -> Result<EditorsResponse, EngineError> {
+        self.update_editors_with_actor_email(actor_pubkey, None, name, request, now)
+    }
+
+    pub fn update_editors_with_actor_email(
+        &mut self,
+        actor_pubkey: &str,
+        actor_email: Option<&str>,
+        name: &str,
+        request: &EditorsRequest,
+        now: u64,
+    ) -> Result<EditorsResponse, EngineError> {
+        let site = self
+            .store
+            .site_by_name(name)?
+            .ok_or(EngineError::SiteNotFound)?;
+        if !self.actor_can_manage_editors(&site, actor_pubkey, actor_email, now)? {
+            return Err(EngineError::NotAuthorized);
+        }
+        let changes = request.add_emails.len() + request.remove_emails.len();
+        if changes > MAX_EMAILS_PER_SHARING_REQUEST as usize {
+            return Err(EngineError::Validation("too many emails in one request"));
+        }
+
+        // Bounded by MAX_EMAILS_PER_SHARING_REQUEST, checked above.
+        for email in &request.remove_emails {
+            let normalized = validate_email(email)?;
+            if site.owner_email.as_deref() == Some(normalized.as_str()) {
+                return Err(EngineError::Validation(
+                    "owner email cannot be removed as editor",
+                ));
+            }
+            self.store.remove_editor(&site.id, &normalized, now)?;
+        }
+        for email in &request.add_emails {
+            let normalized = validate_email(email)?;
+            if site.owner_email.as_deref() == Some(normalized.as_str()) {
+                continue;
+            }
+            if !self.store.is_email_editor(&site.id, &normalized)?
+                && self.store.count_editors(&site.id)? >= MAX_EDITORS_PER_SITE
+            {
+                return Err(EngineError::TooManyEditors);
+            }
+            self.store
+                .add_editor(&site.id, &normalized, actor_pubkey, now)?;
+        }
+        self.store
+            .record_event(Some(&site.id), "editors_updated", Some(actor_pubkey), now)?;
+        Ok(EditorsResponse {
+            owner_email: site.owner_email,
+            editor_emails: self.store.editors(&site.id)?,
+        })
+    }
+
+    pub fn list_editors(
+        &self,
+        actor_pubkey: &str,
+        name: &str,
+    ) -> Result<EditorsResponse, EngineError> {
+        self.list_editors_with_actor_email(actor_pubkey, None, name, 0)
+    }
+
+    pub fn list_editors_with_actor_email(
+        &self,
+        actor_pubkey: &str,
+        actor_email: Option<&str>,
+        name: &str,
+        now: u64,
+    ) -> Result<EditorsResponse, EngineError> {
+        let site = self
+            .store
+            .site_by_name(name)?
+            .ok_or(EngineError::SiteNotFound)?;
+        if !self.actor_can_manage_editors(&site, actor_pubkey, actor_email, now)? {
+            return Err(EngineError::NotAuthorized);
+        }
+        Ok(EditorsResponse {
+            owner_email: site.owner_email,
+            editor_emails: self.store.editors(&site.id)?,
+        })
+    }
+
     // ---- listing / status ------------------------------------------------------
 
     pub fn list_sites(&self, owner_pubkey: &str) -> Result<Vec<SiteSummary>, EngineError> {
@@ -564,9 +930,32 @@ impl Engine {
             status: site.status.as_str().to_string(),
             visibility: site.visibility.as_str().to_string(),
             kind: site.kind.as_str().to_string(),
+            owner_email: site.owner_email.clone(),
             active_version: site.active_version_number,
             shared_emails: self.store.shares(&site.id)?,
+            editor_emails: self.store.editors(&site.id)?,
+            source: self.site_source_info(site)?,
         })
+    }
+
+    fn site_source_info(
+        &self,
+        site: &SiteRecord,
+    ) -> Result<Option<SourceSnapshotInfo>, EngineError> {
+        let Some(version_id) = site.active_version_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(version_number) = site.active_version_number else {
+            return Err(StoreError::CorruptState("active version missing number").into());
+        };
+        Ok(self
+            .store
+            .version_source(version_id)?
+            .map(|source| SourceSnapshotInfo {
+                version_number,
+                sha256: source.sha256,
+                size: source.size,
+            }))
     }
 
     // ---- serving ---------------------------------------------------------------
@@ -661,6 +1050,47 @@ impl Engine {
         Ok(None)
     }
 
+    /// Exact active-version lookup with no folder or SPA fallback. Use this
+    /// when the distinction between a path the user authored and a path the
+    /// platform can synthesize matters.
+    pub fn lookup_exact_file(
+        &self,
+        site: &SiteRecord,
+        request_path: &str,
+    ) -> Result<Option<FoundFile>, EngineError> {
+        assert!(request_path.starts_with('/'));
+        let Some(version_id) = site.active_version_id.as_deref() else {
+            return Ok(None);
+        };
+        Ok(self
+            .store
+            .version_file(version_id, request_path)?
+            .map(|(sha256, size)| FoundFile {
+                path: request_path.to_string(),
+                sha256,
+                size,
+            }))
+    }
+
+    /// A site gets platform-authored agent instructions only when another
+    /// human can edit it, the current Version has source, and the user did
+    /// not publish their own `/llms.txt`.
+    pub fn should_generate_llms_txt(&self, site: &SiteRecord) -> Result<bool, EngineError> {
+        if site.status != SiteStatus::Published {
+            return Ok(false);
+        }
+        if site.kind != SiteKind::Static {
+            return Ok(false);
+        }
+        if self.lookup_exact_file(site, "/llms.txt")?.is_some() {
+            return Ok(false);
+        }
+        if self.store.editors(&site.id)?.is_empty() {
+            return Ok(false);
+        }
+        Ok(self.site_source_info(site)?.is_some())
+    }
+
     /// The site's custom 404 page, if it published one.
     pub fn lookup_not_found_page(
         &self,
@@ -681,6 +1111,41 @@ impl Engine {
 
     pub fn read_blob(&self, sha256: &str) -> Result<Vec<u8>, EngineError> {
         Ok(self.blobs.get(sha256)?)
+    }
+
+    pub fn source_snapshot(
+        &self,
+        actor_pubkey: &str,
+        actor_email: Option<&str>,
+        name: &str,
+        now: u64,
+    ) -> Result<SourceSnapshotDownload, EngineError> {
+        let site = match actor_email {
+            Some(email) => {
+                let (site, _) = self.authorize_email_publish(name, actor_pubkey, email, now)?;
+                site
+            }
+            None => {
+                let site = self
+                    .store
+                    .site_by_name(name)?
+                    .ok_or(EngineError::SiteNotFound)?;
+                if actor_pubkey != site.owner_pubkey && actor_pubkey != site.site_pubkey {
+                    return Err(EngineError::NotAuthorized);
+                }
+                site
+            }
+        };
+        let Some((version_number, source)) = self.store.active_version_source(&site.id)? else {
+            return Err(EngineError::SiteNotFound);
+        };
+        let bytes = self.blobs.get(&source.sha256)?;
+        Ok(SourceSnapshotDownload {
+            version_number,
+            sha256: source.sha256,
+            size: source.size,
+            bytes,
+        })
     }
 
     /// Filesystem path of a blob, for streaming large bundles.
@@ -817,35 +1282,119 @@ impl Engine {
     // ---- internal helpers ----------------------------------------------------------
 
     fn authorize_site_key(&self, site_pubkey: &str, now: u64) -> Result<SiteRecord, EngineError> {
+        if !hex::is_hex32(site_pubkey) {
+            return Err(EngineError::NotAuthorized);
+        }
         let site = self
             .store
             .site_by_site_pubkey(site_pubkey)?
             .ok_or(EngineError::SiteNotFound)?;
-        if site.status == SiteStatus::Disabled || site.status == SiteStatus::Deleted {
-            return Err(EngineError::Conflict("site is disabled"));
-        }
-        // Revoking all of an owner's grants stops publishing for their sites.
-        if !self.store.has_publish_access(&site.owner_pubkey, now)? {
-            return Err(EngineError::NotAllowlisted);
-        }
+        self.ensure_site_can_publish(&site, now)?;
         Ok(site)
     }
 
-    fn authorize_publish(
+    fn authorize_email_publish(
         &self,
-        site_pubkey: &str,
+        name: &str,
+        actor_pubkey: &str,
+        actor_email: &str,
+        now: u64,
+    ) -> Result<(SiteRecord, String), EngineError> {
+        if !hex::is_hex32(actor_pubkey) {
+            return Err(EngineError::NotAuthorized);
+        }
+        let normalized = validate_email(actor_email)?;
+        let site = self
+            .store
+            .site_by_name(name)?
+            .ok_or(EngineError::SiteNotFound)?;
+        self.authorize_email_for_site(&site, actor_pubkey, &normalized, now)?;
+        Ok((site, normalized))
+    }
+
+    fn authorize_email_for_site(
+        &self,
+        site: &SiteRecord,
+        actor_pubkey: &str,
+        email: &str,
+        now: u64,
+    ) -> Result<(), EngineError> {
+        self.ensure_site_can_publish(site, now)?;
+        if !self.store.has_email_key(email, actor_pubkey)? {
+            return Err(EngineError::NotAuthorized);
+        }
+        let is_owner_email = site.owner_email.as_deref() == Some(email);
+        let is_editor = self.store.is_email_editor(&site.id, email)?;
+        if !is_owner_email && !is_editor {
+            return Err(EngineError::NotAuthorized);
+        }
+        Ok(())
+    }
+
+    fn actor_can_manage_editors(
+        &self,
+        site: &SiteRecord,
+        actor_pubkey: &str,
+        actor_email: Option<&str>,
+        now: u64,
+    ) -> Result<bool, EngineError> {
+        if actor_pubkey == site.owner_pubkey || actor_pubkey == site.site_pubkey {
+            return Ok(true);
+        }
+        let Some(email) = actor_email else {
+            return Ok(false);
+        };
+        let normalized = validate_email(email)?;
+        if site.owner_email.as_deref() != Some(normalized.as_str()) {
+            return Ok(false);
+        }
+        self.ensure_site_can_publish(site, now)?;
+        Ok(self.store.has_email_key(&normalized, actor_pubkey)?)
+    }
+
+    fn authorize_publish_actor(
+        &self,
+        actor_pubkey: &str,
         publish_id: &str,
         now: u64,
-    ) -> Result<(SiteRecord, finitesites_store::PublishRecord), EngineError> {
-        let site = self.authorize_site_key(site_pubkey, now)?;
+    ) -> Result<(SiteRecord, PublishRecord), EngineError> {
+        if !hex::is_hex32(actor_pubkey) {
+            return Err(EngineError::NotAuthorized);
+        }
         let publish = self
             .store
             .publish_by_id(publish_id)?
             .ok_or(EngineError::PublishNotFound)?;
-        if publish.site_id != site.id {
+        let site = self
+            .store
+            .site_by_id(&publish.site_id)?
+            .ok_or(StoreError::CorruptState("publish references missing site"))?;
+        if let Some(stored_actor) = publish.actor_pubkey.as_deref()
+            && stored_actor != actor_pubkey
+        {
             return Err(EngineError::NotAuthorized);
         }
+        if let Some(email) = publish.actor_email.as_deref() {
+            self.authorize_email_for_site(&site, actor_pubkey, email, now)?;
+            return Ok((site, publish));
+        }
+        if actor_pubkey != site.site_pubkey {
+            return Err(EngineError::NotAuthorized);
+        }
+        self.ensure_site_can_publish(&site, now)?;
         Ok((site, publish))
+    }
+
+    fn ensure_site_can_publish(&self, site: &SiteRecord, now: u64) -> Result<(), EngineError> {
+        if site.status == SiteStatus::Disabled || site.status == SiteStatus::Deleted {
+            return Err(EngineError::Conflict("site is disabled"));
+        }
+        // Revoking all of an owner's grants stops publishing for their sites,
+        // including email-keyed owner/editor publishes.
+        if !self.store.has_publish_access(&site.owner_pubkey, now)? {
+            return Err(EngineError::NotAllowlisted);
+        }
+        Ok(())
     }
 }
 
@@ -864,6 +1413,23 @@ fn validate_start_command(command: &str) -> Result<(), EngineError> {
         ));
     }
     Ok(())
+}
+
+fn validate_source_snapshot(
+    source: &SourceSnapshotRequest,
+) -> Result<SourceSnapshotRecord, EngineError> {
+    if !hex::is_hex32(&source.sha256) {
+        return Err(EngineError::Validation(
+            "source sha256 must be 64 lowercase hex chars",
+        ));
+    }
+    if source.size == 0 || source.size > MAX_SOURCE_SNAPSHOT_BYTES {
+        return Err(EngineError::Validation("source snapshot size is invalid"));
+    }
+    Ok(SourceSnapshotRecord {
+        sha256: source.sha256.clone(),
+        size: source.size,
+    })
 }
 
 #[cfg(test)]

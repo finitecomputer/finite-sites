@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, OriginalUri, Path, State};
+use axum::extract::{DefaultBodyLimit, OriginalUri, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post, put};
@@ -26,11 +26,19 @@ pub fn router(state: Arc<AppState>) -> Router {
     let blob_limit = DefaultBodyLimit::max(MAX_APP_BUNDLE_BYTES as usize + 1024);
     Router::new()
         .route("/api/v1/healthz", get(healthz))
+        .route("/api/v1/email-auth/request", post(request_email_login))
+        .route("/api/v1/email-auth/redeem", post(redeem_email_login))
         .route("/api/v1/sites/claim", post(claim))
         .route("/api/v1/sites", get(list_sites))
         .route("/api/v1/sites/{name}", get(site_status))
         .route("/api/v1/sites/{name}/sharing", post(set_sharing))
+        .route("/api/v1/sites/{name}/owner-email", post(set_owner_email))
+        .route(
+            "/api/v1/sites/{name}/editors",
+            get(list_editors).post(update_editors),
+        )
         .route("/api/v1/sites/{name}/publish", post(begin_publish))
+        .route("/api/v1/sites/{name}/source", get(source_snapshot))
         .route(
             "/api/v1/publishes/{publish_id}/blobs/{sha256}",
             put(upload_blob).layer(blob_limit),
@@ -94,7 +102,10 @@ impl From<EngineError> for ApiError {
             EngineError::SiteNotFound | EngineError::PublishNotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, "not_found", message)
             }
-            EngineError::TooManySites | EngineError::TooManyShares => {
+            EngineError::TooManySites
+            | EngineError::TooManyShares
+            | EngineError::TooManyEditors
+            | EngineError::TooManyEmailKeys => {
                 ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "limit_exceeded", message)
             }
             EngineError::Validation(_) | EngineError::Proto(_) => {
@@ -154,6 +165,19 @@ fn parse_json_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Api
         .map_err(|error| ApiError::bad_request(format!("invalid json: {error}")))
 }
 
+/// Best-effort client identity for rate limiting. Spoofable headers only
+/// weaken the per-IP budget; the per-email budget still binds.
+fn client_key(headers: &HeaderMap) -> String {
+    let from_header = headers
+        .get("cf-connecting-ip")
+        .or_else(|| headers.get("x-forwarded-for"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 64);
+    from_header.unwrap_or("direct").to_string()
+}
+
 /// Engine errors that indicate operator-side failure also go to stderr.
 fn log_if_internal(error: &EngineError) {
     let is_internal = matches!(
@@ -175,6 +199,71 @@ async fn api_not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "unknown api route")
 }
 
+async fn request_email_login(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<finitesites_proto::dto::EmailLoginResponse>, ApiError> {
+    let request: finitesites_proto::dto::EmailLoginRequest = parse_json_body(&body)?;
+    let now = now_unix();
+    let ip_key = format!("email-login-ip:{}", client_key(&headers));
+    let email_key = format!(
+        "email-login-email:{}",
+        request.email.trim().to_ascii_lowercase()
+    );
+    let ip_allowed =
+        state
+            .login_limiter
+            .check_and_record(&ip_key, crate::limiter::MAX_LINKS_PER_IP, now);
+    let email_allowed =
+        state
+            .login_limiter
+            .check_and_record(&email_key, crate::limiter::MAX_LINKS_PER_EMAIL, now);
+    if !ip_allowed || !email_allowed {
+        return Ok(Json(finitesites_proto::dto::EmailLoginResponse {
+            email: request.email.trim().to_ascii_lowercase(),
+        }));
+    }
+
+    let token = {
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine
+            .request_email_login(&request.email, now)
+            .map_err(ApiError::from)?
+    };
+    if let Err(error) = state
+        .mailer
+        .send_email_login_token(&token.email, &token.token)
+    {
+        eprintln!("finitesitesd mail error: {error}");
+        return Err(internal_error("mail delivery failure"));
+    }
+    Ok(Json(finitesites_proto::dto::EmailLoginResponse {
+        email: token.email,
+    }))
+}
+
+async fn redeem_email_login(
+    State(state): State<Arc<AppState>>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<finitesites_proto::dto::EmailRedeemResponse>, ApiError> {
+    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: finitesites_proto::dto::EmailRedeemRequest = parse_json_body(&body)?;
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let email = engine
+        .redeem_email_login(&actor, &request.email, &request.token, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    Ok(Json(finitesites_proto::dto::EmailRedeemResponse {
+        email,
+        pubkey: actor,
+    }))
+}
+
 async fn claim(
     State(state): State<Arc<AppState>>,
     original_uri: OriginalUri,
@@ -185,7 +274,13 @@ async fn claim(
     let request: ClaimRequest = parse_json_body(&body)?;
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let outcome = engine
-        .claim(&owner, &request.name, &request.site_pubkey, now_unix())
+        .claim_with_owner_email(
+            &owner,
+            &request.name,
+            &request.site_pubkey,
+            request.owner_email.as_deref(),
+            now_unix(),
+        )
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)
@@ -196,6 +291,7 @@ async fn claim(
         url: outcome.url,
         status: outcome.site.status.as_str().to_string(),
         already_claimed: outcome.already_claimed,
+        owner_email: outcome.site.owner_email,
     }))
 }
 
@@ -247,6 +343,68 @@ async fn set_sharing(
     Ok(Json(response))
 }
 
+async fn set_owner_email(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<finitesites_proto::dto::EditorsResponse>, ApiError> {
+    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: finitesites_proto::dto::OwnerEmailRequest = parse_json_body(&body)?;
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .set_owner_email(&actor, &name, &request.owner_email, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    Ok(Json(response))
+}
+
+async fn list_editors(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(query): Query<SourceQuery>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+) -> Result<Json<finitesites_proto::dto::EditorsResponse>, ApiError> {
+    let actor = authenticate(&state, &headers, "GET", &original_uri, None)?;
+    let engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .list_editors_with_actor_email(&actor, query.email.as_deref(), &name, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    Ok(Json(response))
+}
+
+async fn update_editors(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<finitesites_proto::dto::EditorsResponse>, ApiError> {
+    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: finitesites_proto::dto::EditorsRequest = parse_json_body(&body)?;
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .update_editors_with_actor_email(
+            &actor,
+            request.actor_email.as_deref(),
+            &name,
+            &request,
+            now_unix(),
+        )
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    Ok(Json(response))
+}
+
 async fn begin_publish(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -254,7 +412,7 @@ async fn begin_publish(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<PublishBeginResponse>, ApiError> {
-    let site_key = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: PublishBeginRequest = parse_json_body(&body)?;
 
     // Reject start commands the configured runner cannot execute NOW, so
@@ -267,31 +425,47 @@ async fn begin_publish(
 
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
 
-    // The URL names a site; the signer must hold that exact site's key.
-    let site = engine
-        .resolve_site(&name)
-        .map_err(ApiError::from)?
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not_found", "site not found"))?;
-    if site.site_pubkey != site_key {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "not_authorized",
-            "signer is not this site's key",
-        ));
-    }
-
-    let outcome = engine
-        .begin_publish(
-            &site_key,
+    let outcome = match request.actor_email.as_deref() {
+        Some(email) => engine.begin_publish_as_email(
+            &actor,
+            email,
+            &name,
             &request.manifest,
             request.spa,
             request.start_command.as_deref(),
+            request.source.as_ref(),
             now_unix(),
-        )
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
+        ),
+        None => {
+            // The URL names a site; without actor_email the signer must hold
+            // that exact site's key.
+            let site = engine
+                .resolve_site(&name)
+                .map_err(ApiError::from)?
+                .ok_or_else(|| {
+                    ApiError::new(StatusCode::NOT_FOUND, "not_found", "site not found")
+                })?;
+            if site.site_pubkey != actor {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "not_authorized",
+                    "signer is not this site's key",
+                ));
+            }
+            engine.begin_publish_with_source(
+                &actor,
+                &request.manifest,
+                request.spa,
+                request.start_command.as_deref(),
+                request.source.as_ref(),
+                now_unix(),
+            )
+        }
+    }
+    .map_err(|error| {
+        log_if_internal(&error);
+        ApiError::from(error)
+    })?;
     Ok(Json(PublishBeginResponse {
         publish_id: outcome.publish_id,
         missing: outcome.missing,
@@ -305,10 +479,10 @@ async fn upload_blob(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let site_key = authenticate(&state, &headers, "PUT", &original_uri, Some(&body))?;
+    let actor = authenticate(&state, &headers, "PUT", &original_uri, Some(&body))?;
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     engine
-        .upload_blob(&site_key, &publish_id, &sha256, &body, now_unix())
+        .upload_blob_as_actor(&actor, &publish_id, &sha256, &body, now_unix())
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)
@@ -323,10 +497,10 @@ async fn finalize_publish(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<PublishFinalizeResponse>, ApiError> {
-    let site_key = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let outcome = engine
-        .finalize_publish(&site_key, &publish_id, now_unix())
+        .finalize_publish_as_actor(&actor, &publish_id, now_unix())
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)
@@ -346,5 +520,45 @@ async fn finalize_publish(
         url: outcome.url,
         path_count: outcome.path_count,
         total_bytes: outcome.total_bytes,
+        source: outcome.source,
     }))
+}
+
+#[derive(serde::Deserialize)]
+struct SourceQuery {
+    email: Option<String>,
+}
+
+async fn source_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(query): Query<SourceQuery>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let actor = authenticate(&state, &headers, "GET", &original_uri, None)?;
+    let engine = state.engine.lock().expect("engine mutex never poisoned");
+    let source = engine
+        .source_snapshot(&actor, query.email.as_deref(), &name, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    let headers = [
+        (header::CONTENT_TYPE, "application/gzip".to_string()),
+        (
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}-source.tar.gz\""),
+        ),
+        (
+            "x-finite-source-version".parse().unwrap(),
+            source.version_number.to_string(),
+        ),
+        ("x-finite-source-sha256".parse().unwrap(), source.sha256),
+        (
+            "x-finite-source-size".parse().unwrap(),
+            source.size.to_string(),
+        ),
+    ];
+    Ok((StatusCode::OK, headers, source.bytes).into_response())
 }

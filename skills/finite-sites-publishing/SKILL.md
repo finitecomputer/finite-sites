@@ -62,7 +62,7 @@ fsite status NAME
 
 ```bash
 fsite claim NAME
-fsite publish NAME ./dist
+fsite publish NAME ./dist --source .
 ```
 
 If the site is a single-page app with client-side routing (React Router,
@@ -70,7 +70,7 @@ Vue Router, etc. using history-API URLs like `/settings`), add `--spa` so
 unknown paths serve the app shell instead of 404:
 
 ```bash
-fsite publish NAME ./dist --spa
+fsite publish NAME ./dist --spa --source .
 ```
 
 Plain multi-page sites and hash-routed apps do not need `--spa`.
@@ -90,6 +90,32 @@ fsite share NAME --public --yes-public              # public (see warning)
 
 People shared by email sign in with a magic link sent to that address —
 no account or password.
+
+## Collaborative Editing
+
+For a site that should be editable by another person, attach an owner email
+and add editor emails:
+
+```bash
+fsite claim NAME --owner-email owner@example.com
+fsite publish NAME ./dist --source . --owner-email owner@example.com
+fsite editors NAME --add-email editor@example.com
+```
+
+When editing a site as an email-keyed editor:
+
+```bash
+fsite email-login editor@example.com
+fsite email-redeem editor@example.com TOKEN_FROM_EMAIL
+fsite source pull NAME ./site-source --email editor@example.com
+cd ./site-source
+# edit, test, and build
+fsite publish NAME ./dist --source . --email editor@example.com
+```
+
+If `https://NAME.finite.chat/llms.txt` exists and is platform-generated, use
+it as the handoff guide. If the project contains its own `llms.txt`, preserve
+it and follow it as project-specific guidance.
 
 ## Server Apps (tier 2)
 

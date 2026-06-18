@@ -23,6 +23,7 @@ pub enum MailerError {
 
 pub trait Mailer: Send + Sync {
     fn send_login_link(&self, email: &str, site_name: &str, url: &str) -> Result<(), MailerError>;
+    fn send_email_login_token(&self, email: &str, token: &str) -> Result<(), MailerError>;
 }
 
 /// Message text is shared by every mailer so dev output matches what real
@@ -35,6 +36,19 @@ fn login_link_text(site_name: &str, url: &str) -> String {
     format!(
         "Open this link to view {site_name}:\n\n{url}\n\n\
          The link works once and expires in 15 minutes. If you did not \
+         request it, you can ignore this email.\n"
+    )
+}
+
+fn email_login_subject() -> &'static str {
+    "Your Finite Sites email login"
+}
+
+fn email_login_text(email: &str, token: &str) -> String {
+    format!(
+        "Run this command to verify {email} for Finite Sites publishing:\n\n\
+         fsite email-redeem {email} {token}\n\n\
+         The token works once and expires in 15 minutes. If you did not \
          request it, you can ignore this email.\n"
     )
 }
@@ -67,6 +81,27 @@ impl Mailer for DevMailer {
         write!(file, "{}", login_link_text(site_name, url))?;
         eprintln!(
             "dev-mail: login link for {email} -> {url} (written to {})",
+            path.display()
+        );
+        Ok(())
+    }
+
+    fn send_email_login_token(&self, email: &str, token: &str) -> Result<(), MailerError> {
+        let nonce = hex::encode(&ids::random_32()[..4]);
+        let safe_email: String = email
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let path = self
+            .outbox_dir
+            .join(format!("{nonce}-{safe_email}-email-login.txt"));
+        let mut file = std::fs::File::create(&path)?;
+        writeln!(file, "To: {email}")?;
+        writeln!(file, "Subject: {}", email_login_subject())?;
+        writeln!(file)?;
+        write!(file, "{}", email_login_text(email, token))?;
+        eprintln!(
+            "dev-mail: email login token for {email} -> {token} (written to {})",
             path.display()
         );
         Ok(())
@@ -143,18 +178,34 @@ fn build_payload(
     site_name: &str,
     url: &str,
 ) -> serde_json::Value {
+    build_text_payload(
+        provider,
+        from_address,
+        to_email,
+        &login_link_subject(site_name),
+        &login_link_text(site_name, url),
+    )
+}
+
+fn build_text_payload(
+    provider: MailProvider,
+    from_address: &str,
+    to_email: &str,
+    subject: &str,
+    text: &str,
+) -> serde_json::Value {
     match provider {
         MailProvider::Resend => serde_json::json!({
             "from": from_address,
             "to": [to_email],
-            "subject": login_link_subject(site_name),
-            "text": login_link_text(site_name, url),
+            "subject": subject,
+            "text": text,
         }),
         MailProvider::Postmark => serde_json::json!({
             "From": from_address,
             "To": to_email,
-            "Subject": login_link_subject(site_name),
-            "TextBody": login_link_text(site_name, url),
+            "Subject": subject,
+            "TextBody": text,
             "MessageStream": "outbound",
         }),
     }
@@ -178,6 +229,39 @@ impl Mailer for HttpMailer {
             Err(ureq::Error::Status(code, response)) => {
                 // Provider error bodies are short JSON; bound the read and
                 // log enough to debug deliverability without the API key.
+                let body = response
+                    .into_string()
+                    .unwrap_or_else(|_| "unreadable body".to_string());
+                let truncated: String = body.chars().take(500).collect();
+                Err(MailerError::Send(format!(
+                    "provider returned {code}: {truncated}"
+                )))
+            }
+            Err(transport) => Err(MailerError::Send(format!("transport error: {transport}"))),
+        }
+    }
+
+    fn send_email_login_token(&self, email: &str, token: &str) -> Result<(), MailerError> {
+        let payload = build_text_payload(
+            self.provider,
+            &self.from_address,
+            email,
+            email_login_subject(),
+            &email_login_text(email, token),
+        );
+        let auth_value = match self.provider {
+            MailProvider::Resend => format!("Bearer {}", self.api_key),
+            MailProvider::Postmark => self.api_key.clone(),
+        };
+        let result = self
+            .agent
+            .post(self.provider.endpoint())
+            .set(self.provider.auth_header(), &auth_value)
+            .set("Accept", "application/json")
+            .send_json(payload);
+        match result {
+            Ok(_response) => Ok(()),
+            Err(ureq::Error::Status(code, response)) => {
                 let body = response
                     .into_string()
                     .unwrap_or_else(|_| "unreadable body".to_string());

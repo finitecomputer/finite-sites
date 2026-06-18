@@ -9,9 +9,15 @@ with exactly these meanings.
   first-come, claimed before any upload. Reserved names are rejected.
 - **User Key / Owner**: the user's nostr keypair (npub). It claims names,
   lists sites, and may change sharing. The publish grant cache is keyed on it.
+- **Owner Email**: the human-facing email label for a site's owner. It may
+  publish through a verified Email Key, but it does not replace the User Key.
 - **Site Key**: a per-site nostr keypair generated in the agent workspace at
   `.finite/sites/NAME.env`, registered at claim time. It signs publishes and
   sharing changes for that one site. Never committed, never uploaded.
+- **Email Key**: a local nostr keypair verified for one email address by a
+  single-use email token. It signs email-keyed publishes without exposing npubs.
+- **Editor**: an email address granted publish rights for one site. Editors may
+  create Versions but do not become Owners and do not gain viewer access.
 - **Publish Grant Cache**: the local registry table deciding whether a User
   Key may claim and publish. Operator grants stand in for billing in v1;
   Core grants become the paid-entitlement path. If no active, unexpired grant
@@ -27,6 +33,12 @@ with exactly these meanings.
   and versions. Uploads are verified against the hash they claim.
 - **Version**: an immutable snapshot created by a finalized publish. The
   site serves its **Active Version**; the pointer flip is atomic.
+- **Source Snapshot**: an optional immutable `tar.gz` source archive attached
+  to a Version. It is for editor handoff and is never served as site content.
+- **Agent Handoff File**: `/llms.txt` on a Finite Site. A user-authored file
+  is ordinary site content. If absent, the platform may synthesize one for
+  editable static sites with Source Snapshots so agents can discover the
+  source-pull and email-keyed publish flow.
 - **Visibility**: `private` (nobody), `shared` (emails on the Share list),
   or `public`. Sites are born private. Making a site public requires an
   explicit confirmation from the human, relayed as `confirm_public`.

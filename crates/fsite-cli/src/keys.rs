@@ -11,12 +11,15 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use finitesites_proto::{event, hex, ids};
 
 use crate::CliError;
 
 const IDENTITY_KEY_NAME: &str = "FINITE_SITES_USER_SECRET";
 const SITE_KEY_NAME: &str = "FINITE_SITE_SECRET";
+const EMAIL_KEY_NAME: &str = "FINITE_SITES_EMAIL_SECRET";
 
 pub struct KeyFile {
     pub secret: [u8; 32],
@@ -95,6 +98,28 @@ pub fn load_or_create_identity() -> Result<KeyFile, CliError> {
     write_key_file(&path, IDENTITY_KEY_NAME, &secret)?;
     eprintln!("created new identity at {}", path.display());
     load_key_file(&path, IDENTITY_KEY_NAME)
+}
+
+pub fn email_key_path(email: &str) -> Result<PathBuf, CliError> {
+    let home = std::env::var("HOME")
+        .map_err(|_| CliError::Key("HOME is not set; cannot store email key".to_string()))?;
+    let digest = hex::encode(&Sha256::digest(
+        email.trim().to_ascii_lowercase().as_bytes(),
+    ));
+    Ok(PathBuf::from(home)
+        .join(".config/finite-sites/emails")
+        .join(format!("{}.env", &digest[..16])))
+}
+
+pub fn load_or_create_email_key(email: &str) -> Result<KeyFile, CliError> {
+    let path = email_key_path(email)?;
+    if path.exists() {
+        return load_key_file(&path, EMAIL_KEY_NAME);
+    }
+    let secret = ids::random_32();
+    write_key_file(&path, EMAIL_KEY_NAME, &secret)?;
+    eprintln!("created email key at {}", path.display());
+    load_key_file(&path, EMAIL_KEY_NAME)
 }
 
 pub fn site_key_path(name: &str) -> PathBuf {

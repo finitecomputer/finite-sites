@@ -13,7 +13,7 @@ use axum::extract::{Form, Query, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION, SET_COOKIE,
 };
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
@@ -87,6 +87,20 @@ fn internal_page() -> Response {
     html_response(StatusCode::INTERNAL_SERVER_ERROR, pages::not_found())
 }
 
+fn generated_llms_response(body: String, method: &Method) -> Response {
+    let response_body = if method == Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(body)
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(CACHE_CONTROL, "no-store")
+        .body(response_body)
+        .expect("static response builds")
+}
+
 // ---- content serving ------------------------------------------------------------
 
 async fn serve_path(
@@ -94,6 +108,7 @@ async fn serve_path(
     request: axum::extract::Request,
 ) -> Response {
     let headers = request.headers().clone();
+    let method = request.method().clone();
     let uri = request.uri().clone();
     let site = match resolve_request_site(&state, &headers) {
         Ok(Some(site)) => site,
@@ -106,6 +121,33 @@ async fn serve_path(
 
     if site.status != SiteStatus::Published {
         return html_response(StatusCode::OK, pages::placeholder(&site.name));
+    }
+
+    let llms_request_path =
+        if site.kind == SiteKind::Static && (method == Method::GET || method == Method::HEAD) {
+            decode_request_path(uri.path())
+        } else {
+            None
+        };
+    if llms_request_path.as_deref() == Some("/llms.txt") {
+        let generated = {
+            let engine = state.engine.lock().expect("engine mutex never poisoned");
+            match engine.should_generate_llms_txt(&site) {
+                Ok(true) => Some(crate::llms::generated_llms_txt(
+                    &site.name,
+                    &engine.site_url(&site.name),
+                    &state.api_url,
+                )),
+                Ok(false) => None,
+                Err(error) => {
+                    eprintln!("finitesitesd llms.txt error: {error}");
+                    return internal_page();
+                }
+            }
+        };
+        if let Some(body) = generated {
+            return generated_llms_response(body, &method);
+        }
     }
 
     let access = {
@@ -174,7 +216,7 @@ async fn serve_path(
         };
     }
 
-    if request.method() != axum::http::Method::GET && request.method() != axum::http::Method::HEAD {
+    if method != Method::GET && method != Method::HEAD {
         return html_response(StatusCode::METHOD_NOT_ALLOWED, pages::not_found());
     }
 

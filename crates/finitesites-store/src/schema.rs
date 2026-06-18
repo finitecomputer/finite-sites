@@ -30,6 +30,7 @@ CREATE INDEX IF NOT EXISTS publish_grants_active_pubkey
 CREATE TABLE IF NOT EXISTS sites (
   id TEXT PRIMARY KEY,
   owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
+  owner_email TEXT,
   site_pubkey TEXT NOT NULL UNIQUE CHECK (length(site_pubkey) = 64),
   status TEXT NOT NULL CHECK (status IN ('claimed_unpublished', 'published', 'disabled', 'deleted')),
   visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'public')),
@@ -86,6 +87,8 @@ CREATE TABLE IF NOT EXISTS publishes (
   version_id TEXT REFERENCES versions(id),
   spa_fallback INTEGER NOT NULL DEFAULT 0 CHECK (spa_fallback IN (0, 1)),
   start_command TEXT,
+  actor_pubkey TEXT CHECK (actor_pubkey IS NULL OR length(actor_pubkey) = 64),
+  actor_email TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   CHECK ((status = 'finalized') = (version_id IS NOT NULL))
@@ -101,6 +104,19 @@ CREATE TABLE IF NOT EXISTS publish_files (
   PRIMARY KEY (publish_id, path)
 );
 
+CREATE TABLE IF NOT EXISTS publish_sources (
+  publish_id TEXT PRIMARY KEY REFERENCES publishes(id),
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+  size INTEGER NOT NULL CHECK (size >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS version_sources (
+  version_id TEXT PRIMARY KEY REFERENCES versions(id),
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+  size INTEGER NOT NULL CHECK (size >= 0),
+  created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS blobs (
   sha256 TEXT PRIMARY KEY CHECK (length(sha256) = 64),
   size INTEGER NOT NULL CHECK (size >= 0),
@@ -112,6 +128,39 @@ CREATE TABLE IF NOT EXISTS shares (
   email TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (site_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS site_editors (
+  site_id TEXT NOT NULL REFERENCES sites(id),
+  email TEXT NOT NULL,
+  added_by_pubkey TEXT NOT NULL CHECK (length(added_by_pubkey) = 64),
+  added_at INTEGER NOT NULL,
+  removed_at INTEGER,
+  PRIMARY KEY (site_id, email),
+  CHECK (removed_at IS NULL OR removed_at >= added_at)
+);
+
+CREATE INDEX IF NOT EXISTS site_editors_active
+  ON site_editors(site_id, email) WHERE removed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS email_keys (
+  email TEXT NOT NULL,
+  pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
+  verified_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  PRIMARY KEY (email, pubkey),
+  CHECK (revoked_at IS NULL OR revoked_at >= verified_at)
+);
+
+CREATE INDEX IF NOT EXISTS email_keys_active
+  ON email_keys(email, pubkey) WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS email_login_tokens (
+  token_hash TEXT PRIMARY KEY CHECK (length(token_hash) = 64),
+  email TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER,
+  created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS login_tokens (

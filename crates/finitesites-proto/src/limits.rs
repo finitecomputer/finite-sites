@@ -26,6 +26,14 @@ pub const MAX_SITES_PER_OWNER: u32 = 100;
 /// Google-Doc-shaped (a few collaborators), not a mailing list.
 pub const MAX_SHARES_PER_SITE: u32 = 50;
 
+/// One site may have this many email-keyed editors. This matches the
+/// document-collaboration shape and keeps per-publish editor checks cheap.
+pub const MAX_EDITORS_PER_SITE: u32 = 50;
+
+/// One verified email may keep a handful of active local keys, enough for a
+/// laptop plus agent boxes without becoming an unbounded credential list.
+pub const MAX_EMAIL_KEYS_PER_EMAIL: u32 = 5;
+
 /// Emails are bounded at the wire boundary before validation.
 pub const MAX_EMAIL_BYTES: u32 = 254;
 
@@ -54,6 +62,18 @@ pub const MAX_AUTH_HEADER_BYTES: u32 = 8 * 1024;
 /// ceiling instead of MAX_FILE_BYTES. 256 MiB fits a Next.js standalone
 /// output with room to spare.
 pub const MAX_APP_BUNDLE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Source snapshots are optional editor-handoff archives, not dependency
+/// mirrors. Excluding vendor/build output keeps this comfortably under app
+/// bundle size while allowing real project source.
+pub const MAX_SOURCE_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Source snapshots may include larger project trees than static manifests,
+/// but remain bounded so archive creation and extraction are reviewable.
+pub const MAX_SOURCE_SNAPSHOT_FILES: u32 = 5_000;
+
+/// Empty/generated directory trees should not make source walking unbounded.
+pub const MAX_SOURCE_SNAPSHOT_DIRECTORIES: u32 = 5_000;
 
 /// Start commands are one shell line, not scripts.
 pub const MAX_START_COMMAND_BYTES: u32 = 1024;

@@ -16,6 +16,12 @@ substrate is now finite-owned storage behind one wildcard domain.
   versions, atomic latest-pointer flips, ETag revalidation.
 - **Nostr auth**: every registry mutation is a NIP-98-signed request. The
   user identity key claims names; a per-site workspace-held key publishes.
+- **Email-keyed editors**: a site can have an owner email and additional
+  editor emails. Verified email keys can publish without exposing npubs.
+- **Source snapshots**: publishes can attach a bounded source `tar.gz` so a
+  later editor can pull source, change it, and republish with updated source.
+- **Agent handoff**: editable static sites with source get a generated
+  `/llms.txt` unless the user published that path themselves.
 - **Publish grant cache**: only npubs with an active operator or Core grant can
   claim/publish. The deployed allowlist commands manage operator grants;
   payments/Core sync are the next source.
@@ -37,6 +43,29 @@ behind the same publish API — see `docs/roadmap.md`.
 | `finitesites-engine` | all decisions: claim/publish/share/view/magic links |
 | `finitesitesd` | the server: control-plane API + wildcard site serving + grant ops |
 | `fsite-cli` | agent-facing CLI (`fsite`) |
+
+## Install `fsite`
+
+Download the matching binary from the latest GitHub release:
+
+```text
+https://github.com/finitecomputer/finite-sites/releases/latest
+```
+
+Release assets are named `fsite-linux-x86_64.tar.gz`,
+`fsite-macos-x86_64.tar.gz`, and `fsite-macos-aarch64.tar.gz`.
+
+Or build it from source:
+
+```sh
+cargo install --git https://github.com/finitecomputer/finite-sites --package fsite-cli --bin fsite
+```
+
+For production Finite Sites, point the CLI at the public API:
+
+```sh
+export FINITE_SITES_API=https://api.finite.chat
+```
 
 ## Local quickstart
 
@@ -62,6 +91,35 @@ cargo run -p fsite-cli --bin fsite -- share hello --public --yes-public
 `-H "Host: hello.sites.localhost:8787"` against `127.0.0.1:8787`.
 
 `just dev`, `just test`, `just lint` wrap the common loops.
+
+## Collaborative editing
+
+Owners can label a site with an owner email, publish source, and grant an
+editor:
+
+```sh
+fsite claim my-site --owner-email owner@example.com
+fsite publish my-site ./dist --source . --owner-email owner@example.com
+fsite editors my-site --add-email editor@example.com
+```
+
+An editor verifies their email once per machine, pulls the source snapshot,
+edits it, builds the artifact, and republishes with fresh source:
+
+```sh
+fsite email-login editor@example.com
+fsite email-redeem editor@example.com TOKEN_FROM_EMAIL
+fsite source pull my-site ./my-site-source --email editor@example.com
+cd ./my-site-source
+# edit, test, and build
+fsite publish my-site ./dist --source . --email editor@example.com
+```
+
+For editable static sites that have a source snapshot, Finite Sites serves a
+virtual `/llms.txt` with these instructions when the active version did not
+publish `/llms.txt` itself. That lets an owner send a site link to another
+person and have their agent discover the edit flow without scraping rendered
+HTML as source.
 
 ## Production shape
 

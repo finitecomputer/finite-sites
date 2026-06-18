@@ -28,3 +28,34 @@ just fmt           # rustfmt
 
 Every mutation needs a positive test and at least one negative/replay test.
 `cargo clippy --all-targets -- -D warnings` must pass before any handoff.
+
+# Publishing And Editor Handoff
+
+- `fsite` is the supported agent-facing surface. Do not bypass it with raw
+  nostr events, direct registry writes, DNS edits, or proxy edits.
+- Use `FINITE_SITES_API=https://api.finite.chat` for production unless the
+  task is explicitly local development.
+- For collaborative static sites, publish the built artifact and attach source:
+
+```sh
+fsite publish NAME ./dist --source . --email editor@example.com
+```
+
+- Pull source before editing another person's site:
+
+```sh
+fsite source pull NAME ./site-source --email editor@example.com
+```
+
+- Do not reconstruct source from rendered HTML unless source pull is
+  unavailable and the human explicitly accepts that limitation.
+- A generated `/llms.txt` is platform guidance only. If a project publishes
+  its own `/llms.txt`, preserve it and treat it as the project's authority.
+- Never commit, print, or upload `.finite/`, `.env*`, private keys, dependency
+  directories, or build caches.
+
+# GitHub Release Shape
+
+The public repository is expected to publish `fsite` binaries from tags named
+`v*`. Keep README install commands and generated `/llms.txt` instructions in
+sync with `.github/workflows/release.yml`.

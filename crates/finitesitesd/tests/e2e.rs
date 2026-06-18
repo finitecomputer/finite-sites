@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
 use finitesites_blob::BlobStore;
 use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::dto::{
-    ClaimRequest, ClaimResponse, PublishBeginRequest, PublishBeginResponse,
-    PublishFinalizeResponse, SharingRequest, SharingResponse,
+    ClaimRequest, ClaimResponse, EditorsRequest, EmailLoginRequest, EmailLoginResponse,
+    EmailRedeemRequest, EmailRedeemResponse, PublishBeginRequest, PublishBeginResponse,
+    PublishFinalizeResponse, SharingRequest, SharingResponse, SourceSnapshotRequest,
 };
 use finitesites_proto::{ManifestFile, PublishManifest, hex, nip98};
 use finitesites_store::Store;
@@ -179,6 +180,107 @@ fn outbox_link(outbox: &Path) -> String {
         .to_string()
 }
 
+fn outbox_email_token(outbox: &Path) -> String {
+    let entries: Vec<_> = std::fs::read_dir(outbox).unwrap().collect();
+    assert_eq!(entries.len(), 1, "expected exactly one dev mail");
+    let path = entries[0].as_ref().unwrap().path();
+    let content = std::fs::read_to_string(path).unwrap();
+    content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("fsite email-redeem "))
+        .and_then(|rest| rest.split_whitespace().nth(1))
+        .expect("mail contains an email-redeem command")
+        .to_string()
+}
+
+fn clear_outbox(outbox: &Path) {
+    for entry in std::fs::read_dir(outbox).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+}
+
+fn publish_static_version(
+    server: &TestServer,
+    secret: &[u8; 32],
+    name: &str,
+    files: Vec<(&str, &[u8])>,
+    source: Option<&[u8]>,
+) -> PublishFinalizeResponse {
+    let manifest = PublishManifest {
+        files: files
+            .iter()
+            .map(|(path, bytes)| ManifestFile {
+                path: (*path).to_string(),
+                sha256: sha(bytes),
+                size: bytes.len() as u64,
+            })
+            .collect(),
+    };
+    let source_request = source.map(|bytes| SourceSnapshotRequest {
+        sha256: sha(bytes),
+        size: bytes.len() as u64,
+    });
+    let begin_body = serde_json::to_vec(&PublishBeginRequest {
+        manifest,
+        spa: false,
+        start_command: None,
+        actor_email: None,
+        source: source_request,
+    })
+    .unwrap();
+    let begun: PublishBeginResponse = json_body(
+        server
+            .signed(
+                secret,
+                "POST",
+                &format!("/api/v1/sites/{name}/publish"),
+                Some(&begin_body),
+            )
+            .unwrap(),
+    );
+
+    // Bounded by the manifest size accepted by the server.
+    for (_, bytes) in &files {
+        server
+            .signed(
+                secret,
+                "PUT",
+                &format!(
+                    "/api/v1/publishes/{}/blobs/{}",
+                    begun.publish_id,
+                    sha(bytes)
+                ),
+                Some(*bytes),
+            )
+            .unwrap();
+    }
+    if let Some(bytes) = source {
+        server
+            .signed(
+                secret,
+                "PUT",
+                &format!(
+                    "/api/v1/publishes/{}/blobs/{}",
+                    begun.publish_id,
+                    sha(bytes)
+                ),
+                Some(bytes),
+            )
+            .unwrap();
+    }
+
+    json_body(
+        server
+            .signed(
+                secret,
+                "POST",
+                &format!("/api/v1/publishes/{}/finalize", begun.publish_id),
+                None,
+            )
+            .unwrap(),
+    )
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn full_publish_share_and_view_flow() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
@@ -198,6 +300,7 @@ async fn full_publish_share_and_view_flow() {
         let claim_body = serde_json::to_vec(&ClaimRequest {
             name: "hello".into(),
             site_pubkey: site_pubkey.clone(),
+            owner_email: None,
         })
         .unwrap();
         let claim: ClaimResponse = json_body(
@@ -217,6 +320,7 @@ async fn full_publish_share_and_view_flow() {
         let stranger_claim = serde_json::to_vec(&ClaimRequest {
             name: "intruder".into(),
             site_pubkey: "44".repeat(32),
+            owner_email: None,
         })
         .unwrap();
         let denied = server.signed(
@@ -260,6 +364,8 @@ async fn full_publish_share_and_view_flow() {
             manifest: manifest.clone(),
             spa: false,
             start_command: None,
+            actor_email: None,
+            source: None,
         })
         .unwrap();
         let begun: PublishBeginResponse = json_body(
@@ -446,6 +552,325 @@ async fn full_publish_share_and_view_flow() {
                 .unwrap()
                 .contains("No site lives here")
         );
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_llms_txt_requires_source_and_respects_user_file() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        let site_pubkey = finitesites_proto::event::pubkey_for_secret(&site_secret()).unwrap();
+        let claim_body = serde_json::to_vec(&ClaimRequest {
+            name: "agentdocs".into(),
+            site_pubkey,
+            owner_email: None,
+        })
+        .unwrap();
+        json_body::<ClaimResponse>(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/sites/claim",
+                    Some(&claim_body),
+                )
+                .unwrap(),
+        );
+
+        let editors_body = serde_json::to_vec(&EditorsRequest {
+            actor_email: None,
+            add_emails: vec!["skyler_bot@finite.vip".into()],
+            remove_emails: vec![],
+        })
+        .unwrap();
+        server
+            .signed(
+                &site_secret(),
+                "POST",
+                "/api/v1/sites/agentdocs/editors",
+                Some(&editors_body),
+            )
+            .unwrap();
+
+        publish_static_version(
+            &server,
+            &site_secret(),
+            "agentdocs",
+            vec![("/index.html", b"<h1>v1</h1>")],
+            None,
+        );
+        let no_source = server.site_get("agentdocs", "/llms.txt", port);
+        assert!(matches!(no_source, Err(ureq::Error::Status(401, _))));
+
+        publish_static_version(
+            &server,
+            &site_secret(),
+            "agentdocs",
+            vec![("/index.html", b"<h1>v2</h1>")],
+            Some(b"source archive v2"),
+        );
+        let generated = server.site_get("agentdocs", "/llms.txt", port).unwrap();
+        assert_eq!(
+            generated.header("content-type").unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(generated.header("cache-control").unwrap(), "no-store");
+        let generated_body = generated.into_string().unwrap();
+        assert!(generated_body.contains("fsite source pull agentdocs ./site-source"));
+        assert!(generated_body.contains("https://github.com/finitecomputer/finite-sites"));
+        assert!(!generated_body.contains("skyler_bot@finite.vip"));
+
+        publish_static_version(
+            &server,
+            &site_secret(),
+            "agentdocs",
+            vec![
+                ("/index.html", b"<h1>v3</h1>"),
+                ("/llms.txt", b"custom project instructions"),
+            ],
+            Some(b"source archive v3"),
+        );
+        let private_user_file = server.site_get("agentdocs", "/llms.txt", port);
+        assert!(matches!(
+            private_user_file,
+            Err(ureq::Error::Status(401, _))
+        ));
+
+        let public_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("public".into()),
+            confirm_public: true,
+            add_emails: vec![],
+            remove_emails: vec![],
+        })
+        .unwrap();
+        server
+            .signed(
+                &site_secret(),
+                "POST",
+                "/api/v1/sites/agentdocs/sharing",
+                Some(&public_body),
+            )
+            .unwrap();
+        let custom = server.site_get("agentdocs", "/llms.txt", port).unwrap();
+        assert_eq!(custom.into_string().unwrap(), "custom project instructions");
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn email_editor_publish_and_source_flow() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        let site_pubkey = finitesites_proto::event::pubkey_for_secret(&site_secret()).unwrap();
+        let claim_body = serde_json::to_vec(&ClaimRequest {
+            name: "collab".into(),
+            site_pubkey: site_pubkey.clone(),
+            owner_email: Some("paul@finite.vip".into()),
+        })
+        .unwrap();
+        let claim: ClaimResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/sites/claim",
+                    Some(&claim_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(claim.owner_email.as_deref(), Some("paul@finite.vip"));
+
+        let owner_login_body = serde_json::to_vec(&EmailLoginRequest {
+            email: "paul@finite.vip".into(),
+        })
+        .unwrap();
+        json_body::<EmailLoginResponse>(
+            server
+                .agent
+                .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+                .set("Content-Type", "application/json")
+                .send_bytes(&owner_login_body)
+                .unwrap(),
+        );
+        let owner_token = outbox_email_token(&server.outbox);
+        let owner_redeem_body = serde_json::to_vec(&EmailRedeemRequest {
+            email: "paul@finite.vip".into(),
+            token: owner_token,
+        })
+        .unwrap();
+        let owner_redeemed: EmailRedeemResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/email-auth/redeem",
+                    Some(&owner_redeem_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(owner_redeemed.email, "paul@finite.vip");
+        clear_outbox(&server.outbox);
+
+        let login_body = serde_json::to_vec(&EmailLoginRequest {
+            email: "skyler_bot@finite.vip".into(),
+        })
+        .unwrap();
+        let login: EmailLoginResponse = json_body(
+            server
+                .agent
+                .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+                .set("Content-Type", "application/json")
+                .send_bytes(&login_body)
+                .unwrap(),
+        );
+        assert_eq!(login.email, "skyler_bot@finite.vip");
+        let token = outbox_email_token(&server.outbox);
+
+        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
+            email: "skyler_bot@finite.vip".into(),
+            token,
+        })
+        .unwrap();
+        let redeemed: EmailRedeemResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/email-auth/redeem",
+                    Some(&redeem_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(redeemed.email, "skyler_bot@finite.vip");
+
+        let editors_body = serde_json::to_vec(&EditorsRequest {
+            actor_email: Some("paul@finite.vip".into()),
+            add_emails: vec!["skyler_bot@finite.vip".into()],
+            remove_emails: vec![],
+        })
+        .unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/sites/collab/editors",
+                Some(&editors_body),
+            )
+            .unwrap();
+
+        let index_html: &[u8] = b"<h1>edited</h1>";
+        let source_bytes: &[u8] = b"pretend source archive";
+        let manifest = PublishManifest {
+            files: vec![ManifestFile {
+                path: "/index.html".into(),
+                sha256: sha(index_html),
+                size: index_html.len() as u64,
+            }],
+        };
+        let source = SourceSnapshotRequest {
+            sha256: sha(source_bytes),
+            size: source_bytes.len() as u64,
+        };
+        let begin_body = serde_json::to_vec(&PublishBeginRequest {
+            manifest,
+            spa: false,
+            start_command: None,
+            actor_email: Some("skyler_bot@finite.vip".into()),
+            source: Some(source.clone()),
+        })
+        .unwrap();
+        let begun: PublishBeginResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/sites/collab/publish",
+                    Some(&begin_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(begun.missing, vec![sha(index_html), sha(source_bytes)]);
+        for (blob, digest) in [
+            (index_html, sha(index_html)),
+            (source_bytes, sha(source_bytes)),
+        ] {
+            server
+                .signed(
+                    &stranger_secret(),
+                    "PUT",
+                    &format!("/api/v1/publishes/{}/blobs/{digest}", begun.publish_id),
+                    Some(blob),
+                )
+                .unwrap();
+        }
+        let finalized: PublishFinalizeResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    &format!("/api/v1/publishes/{}/finalize", begun.publish_id),
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(finalized.version_number, 1);
+        assert_eq!(
+            finalized
+                .source
+                .as_ref()
+                .map(|source| source.sha256.as_str()),
+            Some(source.sha256.as_str())
+        );
+
+        let source_response = server
+            .signed(
+                &stranger_secret(),
+                "GET",
+                "/api/v1/sites/collab/source?email=skyler_bot%40finite.vip",
+                None,
+            )
+            .unwrap();
+        assert_eq!(source_response.status(), 200);
+        assert_eq!(
+            source_response.header("x-finite-source-version").unwrap(),
+            "1"
+        );
+        assert_eq!(
+            source_response.into_string().unwrap().as_bytes(),
+            source_bytes
+        );
+
+        let remove_body = serde_json::to_vec(&EditorsRequest {
+            actor_email: None,
+            add_emails: vec![],
+            remove_emails: vec!["skyler_bot@finite.vip".into()],
+        })
+        .unwrap();
+        server
+            .signed(
+                &site_secret(),
+                "POST",
+                "/api/v1/sites/collab/editors",
+                Some(&remove_body),
+            )
+            .unwrap();
+        let denied = server.signed(
+            &stranger_secret(),
+            "POST",
+            "/api/v1/sites/collab/publish",
+            Some(&begin_body),
+        );
+        assert!(matches!(denied, Err(ureq::Error::Status(403, _))));
+
+        let open = server.site_get("collab", "/", port);
+        assert!(matches!(open, Err(ureq::Error::Status(401, _))));
     });
     task.await.unwrap();
 }

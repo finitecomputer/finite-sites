@@ -13,6 +13,7 @@ pub mod api;
 pub mod apps;
 pub mod content_type;
 pub mod limiter;
+pub mod llms;
 pub mod mailer;
 pub mod pages;
 pub mod proxy;

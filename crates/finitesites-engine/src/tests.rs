@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 
 use finitesites_blob::BlobStore;
-use finitesites_proto::dto::SharingRequest;
+use finitesites_proto::dto::{EditorsRequest, SharingRequest, SourceSnapshotRequest};
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
 };
@@ -495,6 +495,274 @@ fn sharing_validates_emails_and_limits() {
     assert!(matches!(
         fx.engine.set_sharing(OWNER, "hello", &over_cap, NOW),
         Err(EngineError::TooManyShares)
+    ));
+}
+
+// ---- email editors and source snapshots -----------------------------------
+
+fn verify_email_key(engine: &mut Engine, email: &str, pubkey: &str) {
+    let token = engine.request_email_login(email, NOW).unwrap();
+    engine
+        .redeem_email_login(pubkey, email, &token.token, NOW + 1)
+        .unwrap();
+}
+
+#[test]
+fn owner_and_editor_email_publish_with_source_snapshot() {
+    let mut fx = fixture();
+    fx.engine
+        .claim_with_owner_email(OWNER, "hello", SITE_KEY, Some("paul@finite.vip"), NOW)
+        .unwrap();
+    verify_email_key(&mut fx.engine, "paul@finite.vip", OWNER);
+    verify_email_key(&mut fx.engine, "skyler_bot@finite.vip", OTHER_OWNER);
+
+    let owner_content: &[u8] = b"<h1>owner</h1>";
+    let owner_manifest = manifest_for(&[("/index.html", owner_content)]);
+    let owner_publish = fx
+        .engine
+        .begin_publish_as_email(
+            OWNER,
+            "paul@finite.vip",
+            "hello",
+            &owner_manifest,
+            false,
+            None,
+            None,
+            NOW + 2,
+        )
+        .unwrap();
+    fx.engine
+        .upload_blob_as_actor(
+            OWNER,
+            &owner_publish.publish_id,
+            &sha(owner_content),
+            owner_content,
+            NOW + 2,
+        )
+        .unwrap();
+    let owner_finalized = fx
+        .engine
+        .finalize_publish_as_actor(OWNER, &owner_publish.publish_id, NOW + 2)
+        .unwrap();
+    assert_eq!(owner_finalized.version_number, 1);
+
+    fx.engine
+        .update_editors_with_actor_email(
+            OWNER,
+            Some("paul@finite.vip"),
+            "hello",
+            &EditorsRequest {
+                actor_email: Some("paul@finite.vip".into()),
+                add_emails: vec!["skyler_bot@finite.vip".into()],
+                remove_emails: vec![],
+            },
+            NOW + 3,
+        )
+        .unwrap();
+
+    let editor_content: &[u8] = b"<h1>editor</h1>";
+    let source_bytes: &[u8] = b"pretend-source-tarball";
+    let source_request = SourceSnapshotRequest {
+        sha256: sha(source_bytes),
+        size: source_bytes.len() as u64,
+    };
+    let editor_manifest = manifest_for(&[("/index.html", editor_content)]);
+    let editor_publish = fx
+        .engine
+        .begin_publish_as_email(
+            OTHER_OWNER,
+            "skyler_bot@finite.vip",
+            "hello",
+            &editor_manifest,
+            false,
+            None,
+            Some(&source_request),
+            NOW + 4,
+        )
+        .unwrap();
+    assert_eq!(
+        editor_publish.missing,
+        vec![sha(editor_content), sha(source_bytes)]
+    );
+    fx.engine
+        .upload_blob_as_actor(
+            OTHER_OWNER,
+            &editor_publish.publish_id,
+            &sha(editor_content),
+            editor_content,
+            NOW + 4,
+        )
+        .unwrap();
+    fx.engine
+        .upload_blob_as_actor(
+            OTHER_OWNER,
+            &editor_publish.publish_id,
+            &sha(source_bytes),
+            source_bytes,
+            NOW + 4,
+        )
+        .unwrap();
+    let editor_finalized = fx
+        .engine
+        .finalize_publish_as_actor(OTHER_OWNER, &editor_publish.publish_id, NOW + 4)
+        .unwrap();
+    assert_eq!(editor_finalized.version_number, 2);
+    let expected_source_sha = sha(source_bytes);
+    assert_eq!(
+        editor_finalized
+            .source
+            .as_ref()
+            .map(|source| source.sha256.as_str()),
+        Some(expected_source_sha.as_str())
+    );
+
+    let summary = fx.engine.site_status(SITE_KEY, "hello").unwrap();
+    assert_eq!(summary.owner_email.as_deref(), Some("paul@finite.vip"));
+    assert_eq!(summary.editor_emails, vec!["skyler_bot@finite.vip"]);
+    assert!(summary.source.is_some());
+
+    let pulled = fx
+        .engine
+        .source_snapshot(OTHER_OWNER, Some("skyler_bot@finite.vip"), "hello", NOW + 5)
+        .unwrap();
+    assert_eq!(pulled.bytes, source_bytes);
+    assert_eq!(pulled.version_number, 2);
+}
+
+#[test]
+fn viewer_share_does_not_grant_email_publish() {
+    let mut fx = fixture();
+    publish_site(&mut fx.engine, "hello", SITE_KEY);
+    verify_email_key(&mut fx.engine, "viewer@example.com", OTHER_OWNER);
+    fx.engine
+        .set_sharing(
+            SITE_KEY,
+            "hello",
+            &SharingRequest {
+                visibility: Some("shared".into()),
+                confirm_public: false,
+                add_emails: vec!["viewer@example.com".into()],
+                remove_emails: vec![],
+            },
+            NOW + 1,
+        )
+        .unwrap();
+
+    let manifest = manifest_for(&[("/index.html", b"x")]);
+    let result = fx.engine.begin_publish_as_email(
+        OTHER_OWNER,
+        "viewer@example.com",
+        "hello",
+        &manifest,
+        false,
+        None,
+        None,
+        NOW + 2,
+    );
+    assert!(matches!(result, Err(EngineError::NotAuthorized)));
+}
+
+#[test]
+fn removed_editor_cannot_start_or_replay_publish() {
+    let mut fx = fixture();
+    fx.engine
+        .claim_with_owner_email(OWNER, "hello", SITE_KEY, Some("paul@finite.vip"), NOW)
+        .unwrap();
+    verify_email_key(&mut fx.engine, "skyler_bot@finite.vip", OTHER_OWNER);
+    fx.engine
+        .update_editors(
+            SITE_KEY,
+            "hello",
+            &EditorsRequest {
+                actor_email: None,
+                add_emails: vec!["skyler_bot@finite.vip".into()],
+                remove_emails: vec![],
+            },
+            NOW + 1,
+        )
+        .unwrap();
+
+    let content: &[u8] = b"<h1>pending</h1>";
+    let manifest = manifest_for(&[("/index.html", content)]);
+    let pending = fx
+        .engine
+        .begin_publish_as_email(
+            OTHER_OWNER,
+            "skyler_bot@finite.vip",
+            "hello",
+            &manifest,
+            false,
+            None,
+            None,
+            NOW + 2,
+        )
+        .unwrap();
+
+    fx.engine
+        .update_editors(
+            SITE_KEY,
+            "hello",
+            &EditorsRequest {
+                actor_email: None,
+                add_emails: vec![],
+                remove_emails: vec!["skyler_bot@finite.vip".into()],
+            },
+            NOW + 3,
+        )
+        .unwrap();
+
+    let start_after_remove = fx.engine.begin_publish_as_email(
+        OTHER_OWNER,
+        "skyler_bot@finite.vip",
+        "hello",
+        &manifest,
+        false,
+        None,
+        None,
+        NOW + 4,
+    );
+    assert!(matches!(
+        start_after_remove,
+        Err(EngineError::NotAuthorized)
+    ));
+
+    let upload_replay = fx.engine.upload_blob_as_actor(
+        OTHER_OWNER,
+        &pending.publish_id,
+        &sha(content),
+        content,
+        NOW + 4,
+    );
+    assert!(matches!(upload_replay, Err(EngineError::NotAuthorized)));
+
+    let finalize_replay =
+        fx.engine
+            .finalize_publish_as_actor(OTHER_OWNER, &pending.publish_id, NOW + 4);
+    assert!(matches!(finalize_replay, Err(EngineError::NotAuthorized)));
+}
+
+#[test]
+fn publish_with_source_requires_source_blob_before_finalize() {
+    let mut fx = fixture();
+    fx.engine.claim(OWNER, "hello", SITE_KEY, NOW).unwrap();
+    let content: &[u8] = b"<h1>hello</h1>";
+    let source_bytes: &[u8] = b"source";
+    let source_request = SourceSnapshotRequest {
+        sha256: sha(source_bytes),
+        size: source_bytes.len() as u64,
+    };
+    let manifest = manifest_for(&[("/index.html", content)]);
+    let begun = fx
+        .engine
+        .begin_publish_with_source(SITE_KEY, &manifest, false, None, Some(&source_request), NOW)
+        .unwrap();
+    fx.engine
+        .upload_blob(SITE_KEY, &begun.publish_id, &sha(content), content, NOW)
+        .unwrap();
+    let result = fx.engine.finalize_publish(SITE_KEY, &begun.publish_id, NOW);
+    assert!(matches!(
+        result,
+        Err(EngineError::Conflict("publish has missing source blob"))
     ));
 }
 
