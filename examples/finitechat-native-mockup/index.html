@@ -1,0 +1,1200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FiniteChat Native Mockup</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --surface: rgba(255, 255, 255, 0.82);
+      --surface-strong: rgba(255, 255, 255, 0.94);
+      --line: rgba(27, 31, 38, 0.12);
+      --text: #101216;
+      --muted: #707783;
+      --soft: #eef1f5;
+      --blue: #0877e8;
+      --green: #2da56a;
+      --ink: #20242b;
+      --shadow: 0 18px 48px rgba(18, 28, 45, 0.14);
+      --radius: 8px;
+      --glass-blur: blur(22px) saturate(1.4);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 14% 12%, rgba(8, 119, 232, 0.09), transparent 30%),
+        radial-gradient(circle at 86% 18%, rgba(45, 165, 106, 0.11), transparent 34%),
+        linear-gradient(180deg, #fbfcff 0%, var(--bg) 100%);
+      color: var(--text);
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+    }
+
+    .stage {
+      min-height: 100vh;
+      display: grid;
+      place-items: stretch center;
+      padding: 0;
+    }
+
+    .app-shell {
+      position: relative;
+      width: min(100vw, 430px);
+      min-height: 100vh;
+      overflow: hidden;
+      background: #fbfcff;
+      border-left: 1px solid rgba(20, 29, 43, 0.08);
+      border-right: 1px solid rgba(20, 29, 43, 0.08);
+      box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.72);
+    }
+
+    .status {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 28px 0;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .status-icons {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+      color: #0f1115;
+    }
+
+    .signal {
+      display: grid;
+      grid-template-columns: repeat(4, 3px);
+      gap: 2px;
+      align-items: end;
+      height: 12px;
+    }
+
+    .signal span {
+      display: block;
+      width: 3px;
+      border-radius: 3px;
+      background: currentColor;
+    }
+
+    .signal span:nth-child(1) { height: 4px; }
+    .signal span:nth-child(2) { height: 7px; }
+    .signal span:nth-child(3) { height: 10px; opacity: 0.7; }
+    .signal span:nth-child(4) { height: 12px; opacity: 0.45; }
+
+    .battery {
+      width: 27px;
+      height: 13px;
+      border: 2px solid currentColor;
+      border-radius: 4px;
+      position: relative;
+    }
+
+    .battery::before {
+      content: "";
+      position: absolute;
+      right: -5px;
+      top: 3px;
+      width: 3px;
+      height: 5px;
+      border-radius: 0 2px 2px 0;
+      background: currentColor;
+    }
+
+    .battery::after {
+      content: "";
+      position: absolute;
+      inset: 2px;
+      width: 17px;
+      border-radius: 2px;
+      background: currentColor;
+    }
+
+    .screen {
+      position: absolute;
+      inset: 44px 0 0;
+      display: none;
+      grid-template-rows: auto 1fr auto;
+      background: #fbfcff;
+    }
+
+    .screen.is-active {
+      display: grid;
+    }
+
+    .home-content {
+      min-height: 0;
+      overflow: auto;
+      padding: 0 16px 118px;
+    }
+
+    .topbar {
+      position: relative;
+      display: flex;
+      align-items: center;
+      min-height: 86px;
+      padding: 20px 16px 12px;
+    }
+
+    .topbar h1 {
+      margin: 0;
+      font-size: 37px;
+      line-height: 1.02;
+      letter-spacing: 0;
+      font-weight: 800;
+    }
+
+    .topbar.thread {
+      min-height: 64px;
+      padding: 8px 14px 10px;
+      justify-content: center;
+    }
+
+    .topbar.thread h1 {
+      font-size: 19px;
+      line-height: 1.1;
+      max-width: 210px;
+      text-align: center;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .glass-actions {
+      position: absolute;
+      right: 16px;
+      top: 12px;
+      display: flex;
+      gap: 8px;
+      padding: 6px;
+      background: var(--surface);
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+    }
+
+    .icon-button {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: transparent;
+    }
+
+    .icon-button:hover,
+    .icon-button:focus-visible {
+      background: rgba(8, 119, 232, 0.1);
+      outline: none;
+    }
+
+    .icon {
+      width: 23px;
+      height: 23px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .search-wrap {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      padding: 0 0 16px;
+      background: linear-gradient(180deg, #fbfcff 72%, rgba(251, 252, 255, 0));
+    }
+
+    .search-field {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      height: 42px;
+      padding: 0 14px;
+      border-radius: 21px;
+      background: rgba(229, 232, 237, 0.9);
+      color: var(--muted);
+    }
+
+    .search-field input {
+      min-width: 0;
+      flex: 1;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--text);
+    }
+
+    .search-field input::placeholder {
+      color: #7a828f;
+    }
+
+    .section-title {
+      margin: 4px 0 0;
+      padding: 8px 0 8px;
+      color: var(--muted);
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .list {
+      border-top: 1px solid var(--line);
+    }
+
+    .row {
+      width: 100%;
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+      background: transparent;
+      text-align: left;
+    }
+
+    .row:focus-visible {
+      outline: 2px solid rgba(8, 119, 232, 0.4);
+      outline-offset: 2px;
+    }
+
+    .avatar {
+      width: 50px;
+      height: 50px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: #e6e8ec;
+      color: #727985;
+      font-weight: 700;
+      font-size: 20px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .avatar.agent {
+      background:
+        linear-gradient(135deg, rgba(8, 119, 232, 0.18), rgba(45, 165, 106, 0.2)),
+        #edf4f8;
+      color: #17446d;
+    }
+
+    .avatar.people {
+      background:
+        linear-gradient(135deg, #e8edf5, #f4e8ec);
+      color: #3a4656;
+    }
+
+    .presence {
+      position: absolute;
+      right: 2px;
+      bottom: 3px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      border: 2px solid #fbfcff;
+      background: var(--green);
+    }
+
+    .row-main {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .row-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .row-title {
+      min-width: 0;
+      flex: 1;
+      font-size: 18px;
+      line-height: 1.2;
+      font-weight: 650;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .row-meta {
+      color: var(--muted);
+      font-size: 14px;
+      white-space: nowrap;
+    }
+
+    .row-subtitle {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.25;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 23px;
+      height: 23px;
+      padding: 0 7px;
+      border-radius: 12px;
+      background: var(--blue);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .empty {
+      display: grid;
+      place-items: center;
+      min-height: 380px;
+      color: var(--muted);
+      text-align: center;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .empty strong {
+      display: block;
+      margin-top: 10px;
+      color: var(--text);
+      font-size: 20px;
+    }
+
+    .bottom-nav {
+      position: absolute;
+      left: 50%;
+      bottom: 24px;
+      z-index: 20;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 3px;
+      padding: 6px;
+      border-radius: 28px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+    }
+
+    .nav-button {
+      min-width: 82px;
+      height: 52px;
+      display: grid;
+      place-items: center;
+      gap: 2px;
+      padding: 5px 13px;
+      border-radius: 23px;
+      background: transparent;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .nav-button .icon {
+      width: 22px;
+      height: 22px;
+    }
+
+    .nav-button.is-active {
+      background: rgba(8, 119, 232, 0.12);
+      color: var(--blue);
+    }
+
+    .thread-body {
+      min-height: 0;
+      overflow: auto;
+      padding: 4px 14px 120px;
+      background: #f6f7fa;
+    }
+
+    .message-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .day {
+      margin: 8px auto 10px;
+      padding: 5px 10px;
+      border-radius: 14px;
+      background: rgba(0, 0, 0, 0.05);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .bubble {
+      max-width: 82%;
+      padding: 10px 12px;
+      border-radius: 18px;
+      font-size: 16px;
+      line-height: 1.28;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+    }
+
+    .bubble.in {
+      align-self: flex-start;
+      background: #fff;
+      border: 1px solid rgba(0, 0, 0, 0.05);
+      border-bottom-left-radius: 7px;
+    }
+
+    .bubble.out {
+      align-self: flex-end;
+      background: var(--blue);
+      color: #fff;
+      border-bottom-right-radius: 7px;
+    }
+
+    .bubble a {
+      color: inherit;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      font-weight: 650;
+    }
+
+    .bubble ul {
+      margin: 8px 0 0;
+      padding-left: 20px;
+    }
+
+    .bubble li + li {
+      margin-top: 4px;
+    }
+
+    .stamp {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: 8px;
+      font-size: 12px;
+      opacity: 0.72;
+      white-space: nowrap;
+    }
+
+    .check {
+      font-weight: 800;
+      letter-spacing: -2px;
+    }
+
+    .media-tile {
+      width: 245px;
+      overflow: hidden;
+      padding: 0;
+      background: #fff;
+    }
+
+    .media-art {
+      height: 148px;
+      display: grid;
+      place-items: center;
+      background:
+        linear-gradient(145deg, rgba(8, 119, 232, 0.18), rgba(45, 165, 106, 0.22)),
+        repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.55) 7px, transparent 7px, transparent 14px);
+    }
+
+    .media-art svg {
+      width: 62px;
+      height: 62px;
+      color: rgba(23, 68, 109, 0.78);
+    }
+
+    .media-caption {
+      padding: 9px 11px 10px;
+      color: var(--text);
+    }
+
+    .composer {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px 20px;
+      background: rgba(250, 252, 255, 0.92);
+      border-top: 1px solid rgba(0, 0, 0, 0.04);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+    }
+
+    .composer-input {
+      flex: 1;
+      min-width: 0;
+      height: 42px;
+      border: 0;
+      outline: 0;
+      padding: 0 14px;
+      border-radius: 20px;
+      background: #eef1f5;
+      color: var(--text);
+    }
+
+    .back-button {
+      position: absolute;
+      left: 12px;
+      top: 10px;
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--surface);
+      box-shadow: 0 10px 28px rgba(18, 28, 45, 0.1);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+    }
+
+    .thread-actions {
+      right: 12px;
+      top: 10px;
+    }
+
+    .thread-actions .icon-button {
+      width: 39px;
+      height: 39px;
+    }
+
+    .sheet-backdrop {
+      position: absolute;
+      inset: 0;
+      z-index: 40;
+      display: none;
+      align-items: end;
+      background: rgba(10, 14, 22, 0.24);
+    }
+
+    .sheet-backdrop.is-open {
+      display: flex;
+    }
+
+    .sheet {
+      width: 100%;
+      max-height: 86vh;
+      overflow: auto;
+      border-radius: 24px 24px 0 0;
+      background: rgba(252, 253, 255, 0.96);
+      box-shadow: 0 -20px 52px rgba(10, 14, 22, 0.22);
+      -webkit-backdrop-filter: var(--glass-blur);
+      backdrop-filter: var(--glass-blur);
+      padding: 12px 16px 26px;
+    }
+
+    .grabber {
+      width: 46px;
+      height: 5px;
+      margin: 0 auto 12px;
+      border-radius: 5px;
+      background: rgba(0, 0, 0, 0.18);
+    }
+
+    .sheet-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .sheet-header h2 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: 0;
+    }
+
+    .sheet-section {
+      border-top: 1px solid var(--line);
+      padding: 13px 0;
+    }
+
+    .sheet-section h3 {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .field {
+      width: 100%;
+      height: 44px;
+      border: 0;
+      outline: 0;
+      border-radius: 8px;
+      background: #eef1f5;
+      padding: 0 12px;
+      color: var(--text);
+    }
+
+    .sheet-row {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 48px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+      background: transparent;
+      text-align: left;
+    }
+
+    .sheet-row:last-child {
+      border-bottom: 0;
+    }
+
+    .sheet-row small {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .primary {
+      height: 44px;
+      width: 100%;
+      border-radius: 8px;
+      background: var(--blue);
+      color: #fff;
+      font-weight: 700;
+      margin-top: 10px;
+    }
+
+    .disabled {
+      opacity: 0.46;
+      cursor: default;
+    }
+
+    .scanner {
+      position: relative;
+      height: 220px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border-radius: 12px;
+      background: #101216;
+      color: #fff;
+    }
+
+    .scanner video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: none;
+    }
+
+    .scanner.is-live video {
+      display: block;
+    }
+
+    .scanner-frame {
+      position: relative;
+      z-index: 1;
+      width: 132px;
+      height: 132px;
+      border: 2px solid rgba(255, 255, 255, 0.78);
+      border-radius: 18px;
+      box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.26);
+    }
+
+    .scanner-label {
+      position: absolute;
+      z-index: 2;
+      left: 0;
+      right: 0;
+      bottom: 14px;
+      text-align: center;
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.82);
+    }
+
+    .toast {
+      position: absolute;
+      left: 18px;
+      right: 18px;
+      bottom: 100px;
+      z-index: 60;
+      display: none;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(19, 25, 34, 0.92);
+      color: #fff;
+      box-shadow: 0 12px 36px rgba(10, 14, 22, 0.22);
+      font-size: 14px;
+    }
+
+    .toast.is-visible {
+      display: block;
+    }
+
+    @media (min-width: 680px) {
+      .stage {
+        padding: 24px 0;
+      }
+
+      .app-shell {
+        min-height: min(900px, calc(100vh - 48px));
+        max-height: 900px;
+        border-radius: 34px;
+        border: 1px solid rgba(20, 29, 43, 0.1);
+        box-shadow: 0 28px 90px rgba(24, 37, 58, 0.18);
+      }
+
+      .screen {
+        inset: 44px 0 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <main class="app-shell" aria-label="FiniteChat native mockup">
+      <div class="status" aria-hidden="true">
+        <span>10:14</span>
+        <div class="status-icons">
+          <div class="signal"><span></span><span></span><span></span><span></span></div>
+          <svg class="icon" viewBox="0 0 24 24"><path d="M5 12.5a10 10 0 0 1 14 0"/><path d="M8.5 16a5 5 0 0 1 7 0"/><path d="M12 19h.01"/></svg>
+          <div class="battery"></div>
+        </div>
+      </div>
+
+      <section id="home-screen" class="screen is-active">
+        <header class="topbar">
+          <h1 id="tab-title">Chats</h1>
+          <div class="glass-actions" aria-label="App actions">
+            <button class="icon-button" type="button" data-sheet="scan" aria-label="Scan">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M4 7V4h3"/><path d="M17 4h3v3"/><path d="M20 17v3h-3"/><path d="M7 20H4v-3"/><path d="M8 8h3v3H8z"/><path d="M14 8h2"/><path d="M14 11h2"/><path d="M8 14h2"/><path d="M13 14h3v3h-3z"/></svg>
+            </button>
+            <button class="icon-button" type="button" data-sheet="settings" aria-label="Settings">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 0 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H2.8a2 2 0 0 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V2.8a2 2 0 0 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.2.37.5.7.9 1 .3.2.7.4 1.1.4h.1a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-2 1Z"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="home-content">
+          <div class="search-wrap">
+            <label class="search-field">
+              <svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <input id="search" type="search" placeholder="Search chats" autocomplete="off">
+            </label>
+          </div>
+
+          <div id="chats-pane" class="tab-pane">
+            <h2 class="section-title">Chats</h2>
+            <div class="list" data-filterable>
+              <button class="row" type="button" data-open-chat="product">
+                <span class="avatar">P<span class="presence"></span></span>
+                <span class="row-main">
+                  <span class="row-top"><span class="row-title">Product Harness</span><span class="row-meta">10:11</span></span>
+                  <span class="row-subtitle">Hermes: Here is the updated media card.</span>
+                </span>
+                <span class="badge">2</span>
+              </button>
+              <button class="row" type="button" data-open-chat="skyler">
+                <span class="avatar people">S<span class="presence"></span></span>
+                <span class="row-main">
+                  <span class="row-top"><span class="row-title">Skyler Miller</span><span class="row-meta">9:48</span></span>
+                  <span class="row-subtitle">Dinner after we test the phone build?</span>
+                </span>
+              </button>
+              <button class="row" type="button" data-open-chat="hermes">
+                <span class="avatar agent">H</span>
+                <span class="row-main">
+                  <span class="row-top"><span class="row-title">Hermes Lab</span><span class="row-meta">Yesterday</span></span>
+                  <span class="row-subtitle">Markdown, links, reactions, and media round trip.</span>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div id="people-pane" class="tab-pane" hidden>
+            <h2 class="section-title">People</h2>
+            <div class="list" data-filterable>
+              <button class="row" type="button" data-person="skyler">
+                <span class="avatar people">S<span class="presence"></span></span>
+                <span class="row-main">
+                  <span class="row-top"><span class="row-title">Skyler Miller</span><span class="row-meta">npub1...4q7p</span></span>
+                  <span class="row-subtitle">Finite profile from follows</span>
+                </span>
+              </button>
+              <button class="row" type="button" data-person="paul">
+                <span class="avatar people">P<span class="presence"></span></span>
+                <span class="row-main">
+                  <span class="row-top"><span class="row-title">Paul Miller</span><span class="row-meta">npub1...f9aa</span></span>
+                  <span class="row-subtitle">Signed in on this phone</span>
+                </span>
+              </button>
+              <button class="row" type="button" data-person="morgan">
+                <span class="avatar people">M</span>
+                <span class="row-main">
+                  <span class="row-top"><span class="row-title">Morgan Lee</span><span class="row-meta">npub1...c0de</span></span>
+                  <span class="row-subtitle">Prototype tester</span>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          <div id="agents-pane" class="tab-pane" hidden>
+            <h2 class="section-title">Agent Chats</h2>
+            <div class="list" data-filterable>
+              <button class="row" type="button" data-open-chat="hermes">
+                <span class="avatar agent">H<span class="presence"></span></span>
+                <span class="row-main">
+                  <span class="row-top"><span class="row-title">Hermes Lab</span><span class="row-meta">10:11</span></span>
+                  <span class="row-subtitle">Shared room with Paul and Skyler.</span>
+                </span>
+                <span class="badge">1</span>
+              </button>
+              <button class="row" type="button" data-open-chat="product">
+                <span class="avatar agent">F</span>
+                <span class="row-main">
+                  <span class="row-top"><span class="row-title">Finite Product Agent</span><span class="row-meta">Tue</span></span>
+                  <span class="row-subtitle">Collects open questions from app testing.</span>
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <nav class="bottom-nav" aria-label="Primary">
+          <button class="nav-button is-active" type="button" data-tab="chats">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M7 15h8"/><path d="M7 11h10"/><path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-7a8 8 0 0 1 8-12h2a8 8 0 0 1 8 8Z"/></svg>
+            <span>Chats</span>
+          </button>
+          <button class="nav-button" type="button" data-tab="people">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M16 11a4 4 0 1 0-8 0"/><path d="M3 21a7 7 0 0 1 14 0"/><path d="M17 8a3 3 0 0 1 4 3"/><path d="M18 21a5 5 0 0 0-3-4.6"/></svg>
+            <span>People</span>
+          </button>
+          <button class="nav-button" type="button" data-tab="agents">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M12 3 9.8 8.6 4 11l5.8 2.4L12 19l2.2-5.6L20 11l-5.8-2.4Z"/><path d="m18 3 .8 2.2L21 6l-2.2.8L18 9l-.8-2.2L15 6l2.2-.8Z"/></svg>
+            <span>Agents</span>
+          </button>
+        </nav>
+      </section>
+
+      <section id="thread-screen" class="screen">
+        <header class="topbar thread">
+          <button class="back-button" type="button" data-back aria-label="Back">
+            <svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <h1 id="thread-title">Hermes Lab</h1>
+          <div class="glass-actions thread-actions" aria-label="Room actions">
+            <button class="icon-button" type="button" data-toast="Room info" aria-label="Info">
+              <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10v6"/><path d="M12 7h.01"/></svg>
+            </button>
+            <button class="icon-button" type="button" data-toast="Media gallery" aria-label="Media">
+              <svg class="icon" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="m7 16 4-4 3 3 2-2 3 3"/><circle cx="8.5" cy="8.5" r="1.5"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="thread-body">
+          <div class="message-stack">
+            <div class="day">Today</div>
+            <div class="bubble out">Can you render this like Pika did?<span class="stamp">10:08 <span class="check">✓✓</span></span></div>
+            <div class="bubble in">
+              <strong>Yes. Hermes markdown includes links and structure.</strong>
+              <ul>
+                <li>Headings collapse into compact message text.</li>
+                <li>Links remain tappable: <a href="https://finite.vip">finite.vip</a></li>
+                <li>Media stays inline and opens full screen.</li>
+              </ul>
+            </div>
+            <div class="bubble media-tile in">
+              <div class="media-art" aria-label="Mock shared media">
+                <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m6 16 4-4 3 3 2-2 3 3"/><circle cx="8.5" cy="8.5" r="1.5"/></svg>
+              </div>
+              <div class="media-caption">Hermes attached a preview image.</div>
+            </div>
+            <div class="bubble out">This is the shape I want to iterate on in the browser.<span class="stamp">10:11 <span class="check">✓</span></span></div>
+          </div>
+        </div>
+
+        <div class="composer">
+          <button class="icon-button" type="button" data-toast="Attachment picker" aria-label="Add attachment">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+          </button>
+          <input class="composer-input" type="text" placeholder="Message" autocomplete="off">
+          <button class="icon-button" type="button" data-toast="Voice message" aria-label="Voice message">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M19 11a7 7 0 0 1-14 0"/><path d="M12 18v3"/></svg>
+          </button>
+        </div>
+      </section>
+
+      <div class="sheet-backdrop" id="scan-sheet" role="dialog" aria-modal="true" aria-label="Scan">
+        <div class="sheet">
+          <div class="grabber"></div>
+          <div class="sheet-header">
+            <h2>Scan</h2>
+            <button class="icon-button" type="button" data-close-sheet aria-label="Close">
+              <svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12"/><path d="m18 6-12 12"/></svg>
+            </button>
+          </div>
+          <div class="sheet-section">
+            <h3>Invite or Profile Code</h3>
+            <div class="scanner" id="scanner">
+              <video id="camera" playsinline muted></video>
+              <div class="scanner-frame"></div>
+              <div class="scanner-label" id="scanner-label">Camera preview</div>
+            </div>
+            <button class="primary" type="button" id="camera-button">Use Camera</button>
+            <input class="field" id="code-input" type="text" placeholder="Invite URL or npub" autocomplete="off" style="margin-top: 10px">
+            <button class="sheet-row" type="button" id="paste-code">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M8 4h8"/><path d="M9 2h6v4H9z"/><path d="M6 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1"/></svg>
+              <span>Paste</span>
+            </button>
+            <button class="primary" type="button" data-close-sheet>Continue</button>
+          </div>
+          <div class="sheet-section">
+            <h3>Agents</h3>
+            <button class="sheet-row disabled" type="button" disabled>
+              <svg class="icon" viewBox="0 0 24 24"><path d="M12 3 9.8 8.6 4 11l5.8 2.4L12 19l2.2-5.6L20 11l-5.8-2.4Z"/></svg>
+              <span>Create New Finite Agent<small>Coming soon</small></span>
+            </button>
+            <button class="sheet-row disabled" type="button" disabled>
+              <svg class="icon" viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>
+              <span>Connect local sessions<small>Clawi, Maple, Codex, and Claude</small></span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="sheet-backdrop" id="settings-sheet" role="dialog" aria-modal="true" aria-label="Settings">
+        <div class="sheet">
+          <div class="grabber"></div>
+          <div class="sheet-header">
+            <h2>Settings</h2>
+            <button class="icon-button" type="button" data-close-sheet aria-label="Close">
+              <svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12"/><path d="m18 6-12 12"/></svg>
+            </button>
+          </div>
+          <div class="sheet-section">
+            <h3>Profile</h3>
+            <button class="sheet-row" type="button" data-toast="Profile editor">
+              <span class="avatar people">P</span>
+              <span>Paul Miller<small>npub1...f9aa</small></span>
+            </button>
+          </div>
+          <div class="sheet-section">
+            <h3>Server</h3>
+            <button class="sheet-row" type="button" data-toast="Server settings">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M3 7h18"/><path d="M6 12h12"/><path d="M9 17h6"/></svg>
+              <span>Configured server<small>http://localhost:8787</small></span>
+            </button>
+            <button class="sheet-row" type="button" data-toast="Diagnostics copied">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M8 7h8"/><path d="M8 12h8"/><path d="M8 17h5"/><rect x="5" y="3" width="14" height="18" rx="2"/></svg>
+              <span>Developer diagnostics<small>Redacted local copy and share only</small></span>
+            </button>
+          </div>
+          <div class="sheet-section">
+            <button class="sheet-row" type="button" data-toast="Sign out confirmation">
+              <svg class="icon" viewBox="0 0 24 24"><path d="M10 17 5 12l5-5"/><path d="M5 12h12"/><path d="M14 5h5v14h-5"/></svg>
+              <span>Sign Out and Delete Local Data</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="sheet-backdrop" id="person-sheet" role="dialog" aria-modal="true" aria-label="Profile">
+        <div class="sheet">
+          <div class="grabber"></div>
+          <div class="sheet-header">
+            <h2 id="person-name">Skyler Miller</h2>
+            <button class="icon-button" type="button" data-close-sheet aria-label="Close">
+              <svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12"/><path d="m18 6-12 12"/></svg>
+            </button>
+          </div>
+          <div class="sheet-section">
+            <div class="empty" style="min-height: 160px; border-bottom: 0">
+              <svg class="icon" viewBox="0 0 24 24" style="width: 48px; height: 48px"><path d="M16 11a4 4 0 1 0-8 0"/><path d="M3 21a7 7 0 0 1 14 0"/><path d="M17 8a3 3 0 0 1 4 3"/></svg>
+              <strong id="person-npub">npub1...4q7p</strong>
+            </div>
+            <button class="primary" type="button" data-open-chat="skyler" data-close-sheet>Message</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="toast" id="toast" role="status"></div>
+    </main>
+  </div>
+
+  <script>
+    const tabs = {
+      chats: { title: "Chats", placeholder: "Search chats", pane: "chats-pane" },
+      people: { title: "People", placeholder: "Search people", pane: "people-pane" },
+      agents: { title: "Agents", placeholder: "Search agents", pane: "agents-pane" }
+    };
+
+    const chats = {
+      product: "Product Harness",
+      skyler: "Skyler Miller",
+      hermes: "Hermes Lab"
+    };
+
+    const people = {
+      skyler: ["Skyler Miller", "npub1...4q7p"],
+      paul: ["Paul Miller", "npub1...f9aa"],
+      morgan: ["Morgan Lee", "npub1...c0de"]
+    };
+
+    let activeTab = "chats";
+    let cameraStream = null;
+    const search = document.getElementById("search");
+    const toast = document.getElementById("toast");
+
+    function iconToast(message) {
+      toast.textContent = message;
+      toast.classList.add("is-visible");
+      clearTimeout(iconToast.timer);
+      iconToast.timer = setTimeout(() => toast.classList.remove("is-visible"), 1400);
+    }
+
+    function setTab(tab) {
+      activeTab = tab;
+      document.getElementById("tab-title").textContent = tabs[tab].title;
+      search.placeholder = tabs[tab].placeholder;
+      search.value = "";
+      document.querySelectorAll(".tab-pane").forEach((pane) => pane.hidden = pane.id !== tabs[tab].pane);
+      document.querySelectorAll(".nav-button").forEach((button) => {
+        button.classList.toggle("is-active", button.dataset.tab === tab);
+      });
+      filterRows("");
+    }
+
+    function filterRows(value) {
+      const query = value.trim().toLowerCase();
+      const pane = document.getElementById(tabs[activeTab].pane);
+      pane.querySelectorAll(".row").forEach((row) => {
+        row.hidden = query.length > 0 && !row.textContent.toLowerCase().includes(query);
+      });
+    }
+
+    function openSheet(name) {
+      document.getElementById(`${name}-sheet`).classList.add("is-open");
+    }
+
+    function closeSheets() {
+      document.querySelectorAll(".sheet-backdrop").forEach((sheet) => sheet.classList.remove("is-open"));
+      stopCamera();
+    }
+
+    function openChat(id) {
+      document.getElementById("thread-title").textContent = chats[id] || "Chat";
+      document.getElementById("home-screen").classList.remove("is-active");
+      document.getElementById("thread-screen").classList.add("is-active");
+      closeSheets();
+    }
+
+    function openPerson(id) {
+      const profile = people[id] || people.skyler;
+      document.getElementById("person-name").textContent = profile[0];
+      document.getElementById("person-npub").textContent = profile[1];
+      openSheet("person");
+    }
+
+    async function startCamera() {
+      const scanner = document.getElementById("scanner");
+      const label = document.getElementById("scanner-label");
+      const video = document.getElementById("camera");
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        iconToast("Camera is unavailable in this browser");
+        return;
+      }
+      try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        video.srcObject = cameraStream;
+        await video.play();
+        scanner.classList.add("is-live");
+        label.textContent = "Point at an invite QR";
+      } catch (error) {
+        iconToast("Camera permission was not granted");
+      }
+    }
+
+    function stopCamera() {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach((track) => track.stop());
+        cameraStream = null;
+      }
+      document.getElementById("scanner").classList.remove("is-live");
+      document.getElementById("scanner-label").textContent = "Camera preview";
+    }
+
+    document.querySelectorAll("[data-tab]").forEach((button) => {
+      button.addEventListener("click", () => setTab(button.dataset.tab));
+    });
+
+    document.querySelectorAll("[data-sheet]").forEach((button) => {
+      button.addEventListener("click", () => openSheet(button.dataset.sheet));
+    });
+
+    document.querySelectorAll("[data-close-sheet]").forEach((button) => {
+      button.addEventListener("click", closeSheets);
+    });
+
+    document.querySelectorAll("[data-open-chat]").forEach((button) => {
+      button.addEventListener("click", () => openChat(button.dataset.openChat));
+    });
+
+    document.querySelectorAll("[data-person]").forEach((button) => {
+      button.addEventListener("click", () => openPerson(button.dataset.person));
+    });
+
+    document.querySelector("[data-back]").addEventListener("click", () => {
+      document.getElementById("thread-screen").classList.remove("is-active");
+      document.getElementById("home-screen").classList.add("is-active");
+    });
+
+    document.querySelectorAll("[data-toast]").forEach((button) => {
+      button.addEventListener("click", () => iconToast(button.dataset.toast));
+    });
+
+    search.addEventListener("input", (event) => filterRows(event.target.value));
+    document.getElementById("camera-button").addEventListener("click", startCamera);
+    document.getElementById("paste-code").addEventListener("click", async () => {
+      try {
+        document.getElementById("code-input").value = await navigator.clipboard.readText();
+      } catch (error) {
+        iconToast("Clipboard permission was not granted");
+      }
+    });
+
+    document.querySelectorAll(".sheet-backdrop").forEach((backdrop) => {
+      backdrop.addEventListener("click", (event) => {
+        if (event.target === backdrop) closeSheets();
+      });
+    });
+  </script>
+</body>
+</html>
