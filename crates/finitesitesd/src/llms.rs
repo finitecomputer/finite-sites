@@ -43,6 +43,7 @@ cd ./site-source
 # make the requested changes
 # run the project's tests and build command when discoverable
 # replace ./dist with the actual static output directory if this project uses another one
+# if there is no build step and the current directory is the static site, use . instead of ./dist
 fsite publish {site_name} ./dist --source . --email YOUR_EDITOR_EMAIL
 
 Rules:
