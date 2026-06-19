@@ -230,6 +230,19 @@ pub struct ProjectCollaboratorSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectCollaboratorRemoveRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectCollaboratorRemoveResponse {
+    pub project_slug: String,
+    pub email: String,
+    pub removed: bool,
+    pub revoked_git_credentials: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitAuthRequest {
     /// Email identity whose verified local key signs this request.
     pub email: String,

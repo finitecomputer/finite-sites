@@ -15,8 +15,8 @@ use thiserror::Error;
 use finitesites_blob::{BlobError, BlobStore};
 use finitesites_proto::dto::{
     EditorsRequest, EditorsResponse, GitAuthResponse, ProjectApplyRequest,
-    ProjectCollaboratorSummary, ProjectOutputSummary, SharingRequest, SharingResponse, SiteSummary,
-    SourceSnapshotInfo, SourceSnapshotRequest,
+    ProjectCollaboratorRemoveResponse, ProjectCollaboratorSummary, ProjectOutputSummary,
+    SharingRequest, SharingResponse, SiteSummary, SourceSnapshotInfo, SourceSnapshotRequest,
 };
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_APP_BUNDLE_BYTES, MAX_EDITORS_PER_SITE, MAX_EMAIL_KEYS_PER_EMAIL,
@@ -372,6 +372,41 @@ impl Engine {
             outputs,
             collaborators,
         }
+    }
+
+    pub fn remove_project_collaborator(
+        &mut self,
+        owner_pubkey: &str,
+        project_slug: &str,
+        collaborator_email: &str,
+        now: u64,
+    ) -> Result<ProjectCollaboratorRemoveResponse, EngineError> {
+        assert!(hex::is_hex32(owner_pubkey));
+        finitesites_proto::project_config::validate_project_slug(project_slug)?;
+        let email = validate_email(collaborator_email)?;
+        let project = self
+            .store
+            .project_by_slug(project_slug)?
+            .ok_or(EngineError::ProjectNotFound)?;
+        let owner_principal = self
+            .store
+            .principal_by_pubkey(owner_pubkey)?
+            .ok_or(EngineError::NotAuthorized)?;
+        if project.owner_principal_id != owner_principal.id {
+            return Err(EngineError::NotAuthorized);
+        }
+        let removed = self.store.remove_project_collaborator(
+            &project.id,
+            &owner_principal.id,
+            &email,
+            now,
+        )?;
+        Ok(ProjectCollaboratorRemoveResponse {
+            project_slug: project.slug,
+            email: removed.email,
+            removed: removed.removed,
+            revoked_git_credentials: removed.revoked_git_credentials,
+        })
     }
 
     pub fn mint_git_credential(

@@ -81,6 +81,9 @@ while letting the first implementation stay focused.
   `finite.toml` schema and example configs.
 - `fsite auth git PROJECT --email EMAIL --output json` mints a scoped HTTPS
   Git Credential.
+- `fsite project collaborator remove PROJECT --email EMAIL --output json`
+  removes Project edit access and revokes active Git Credentials for that
+  Principal.
 - `git clone https://git.finite.chat/PROJECT.git` and `git push origin main`
   work with standard git through `git-http-backend` behind Finite auth.
 - Pushing the Deploy Branch creates immutable Versions from committed bytes

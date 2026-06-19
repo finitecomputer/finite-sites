@@ -13,7 +13,8 @@ use axum::routing::{get, post, put};
 use finitesites_engine::EngineError;
 use finitesites_proto::dto::{
     ApiErrorBody, ClaimRequest, ClaimResponse, GitAuthRequest, GitAuthResponse,
-    ProjectApplyRequest, ProjectApplyResponse, PublishBeginRequest, PublishBeginResponse,
+    ProjectApplyRequest, ProjectApplyResponse, ProjectCollaboratorRemoveRequest,
+    ProjectCollaboratorRemoveResponse, PublishBeginRequest, PublishBeginResponse,
     PublishFinalizeResponse, SharingRequest, SiteListResponse,
 };
 use finitesites_proto::limits::{MAX_API_BODY_BYTES, MAX_APP_BUNDLE_BYTES};
@@ -32,6 +33,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sites/claim", post(claim))
         .route("/api/v1/projects/apply", post(apply_project))
         .route("/api/v1/projects/{slug}/git-auth", post(auth_git))
+        .route(
+            "/api/v1/projects/{slug}/collaborators/remove",
+            post(remove_project_collaborator),
+        )
         .route("/api/v1/sites", get(list_sites))
         .route("/api/v1/sites/{name}", get(site_status))
         .route("/api/v1/sites/{name}/sharing", post(set_sharing))
@@ -344,6 +349,25 @@ async fn auth_git(
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let response = engine
         .mint_git_credential(&actor, &slug, &request.email, git_remote_url, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    Ok(Json(response))
+}
+
+async fn remove_project_collaborator(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ProjectCollaboratorRemoveResponse>, ApiError> {
+    let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: ProjectCollaboratorRemoveRequest = parse_json_body(&body)?;
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .remove_project_collaborator(&owner, &slug, &request.email, now_unix())
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)

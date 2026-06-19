@@ -341,6 +341,13 @@ pub struct AppliedProjectCollaborator {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedProjectCollaborator {
+    pub email: String,
+    pub removed: bool,
+    pub revoked_git_credentials: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectApplyStoreOutcome {
     pub project: ProjectRecord,
     pub created: bool,
@@ -1108,6 +1115,84 @@ impl Store {
             created: project_created,
             outputs: applied_outputs,
             collaborators: applied_collaborators,
+        })
+    }
+
+    pub fn remove_project_collaborator(
+        &mut self,
+        project_id: &str,
+        owner_principal_id: &str,
+        email: &str,
+        now: u64,
+    ) -> Result<RemovedProjectCollaborator, StoreError> {
+        assert!(!project_id.is_empty());
+        assert!(!owner_principal_id.is_empty());
+        assert!(!email.is_empty());
+
+        let tx = self.conn.transaction()?;
+        let owner_matches: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM projects
+                 WHERE id = ?1 AND owner_principal_id = ?2",
+                params![project_id, owner_principal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if owner_matches.is_none() {
+            return Err(StoreError::Conflict("project owner principal mismatch"));
+        }
+
+        let principal_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM principals WHERE email = ?1",
+                params![email],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(principal_id) = principal_id else {
+            tx.commit()?;
+            return Ok(RemovedProjectCollaborator {
+                email: email.to_string(),
+                removed: false,
+                revoked_git_credentials: 0,
+            });
+        };
+
+        let active_role: Option<String> = tx
+            .query_row(
+                "SELECT role FROM project_collaborators
+                 WHERE project_id = ?1
+                   AND principal_id = ?2
+                   AND removed_at IS NULL",
+                params![project_id, principal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if active_role.as_deref() == Some("owner") {
+            return Err(StoreError::Conflict("project owner cannot be removed"));
+        }
+
+        let removed_rows = tx.execute(
+            "UPDATE project_collaborators
+             SET removed_at = CASE WHEN ?3 >= added_at THEN ?3 ELSE added_at END
+             WHERE project_id = ?1
+               AND principal_id = ?2
+               AND removed_at IS NULL",
+            params![project_id, principal_id, now],
+        )?;
+        let revoked_rows = tx.execute(
+            "UPDATE git_credentials
+             SET revoked_at = CASE WHEN ?3 >= created_at THEN ?3 ELSE created_at END
+             WHERE project_id = ?1
+               AND principal_id = ?2
+               AND revoked_at IS NULL",
+            params![project_id, principal_id, now],
+        )?;
+        tx.commit()?;
+        Ok(RemovedProjectCollaborator {
+            email: email.to_string(),
+            removed: removed_rows > 0,
+            revoked_git_credentials: revoked_rows as u64,
         })
     }
 
@@ -2527,6 +2612,103 @@ mod tests {
         assert!(!replay.collaborators[0].created);
         assert_eq!(replay.project.id, first.project.id);
         assert_eq!(store.project_outputs(&first.project.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn project_collaborator_removal_revokes_git_credentials_and_replays() {
+        let mut store = Store::open_in_memory().unwrap();
+        let applied = store
+            .apply_project(
+                OWNER,
+                "finitechat-native",
+                &[project_output("finitechat-native-mockup")],
+                &[ProjectCollaboratorApply {
+                    email: "skyler@example.com".to_string(),
+                    role: ProjectCollaboratorRole::Editor,
+                }],
+                NOW,
+            )
+            .unwrap();
+        let owner_principal = store.principal_by_pubkey(OWNER).unwrap().unwrap();
+        let collaborator = store
+            .active_project_collaborator_by_email(&applied.project.id, "skyler@example.com")
+            .unwrap()
+            .unwrap();
+        store
+            .create_git_credential(
+                "gcred_1",
+                &applied.project.id,
+                &collaborator.principal_id,
+                SHA_A,
+                None,
+                NOW + 1,
+            )
+            .unwrap();
+        store
+            .create_git_credential(
+                "gcred_2",
+                &applied.project.id,
+                &collaborator.principal_id,
+                SHA_B,
+                None,
+                NOW + 2,
+            )
+            .unwrap();
+
+        let removed = store
+            .remove_project_collaborator(
+                &applied.project.id,
+                &owner_principal.id,
+                "skyler@example.com",
+                NOW + 3,
+            )
+            .unwrap();
+        assert!(removed.removed);
+        assert_eq!(removed.revoked_git_credentials, 2);
+        assert!(
+            store
+                .active_project_collaborator_by_email(&applied.project.id, "skyler@example.com")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .git_credential_by_id("gcred_1")
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
+        assert!(
+            store
+                .git_credential_by_id("gcred_2")
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
+
+        let replay = store
+            .remove_project_collaborator(
+                &applied.project.id,
+                &owner_principal.id,
+                "skyler@example.com",
+                NOW + 4,
+            )
+            .unwrap();
+        assert!(!replay.removed);
+        assert_eq!(replay.revoked_git_credentials, 0);
+
+        let unknown = store
+            .remove_project_collaborator(
+                &applied.project.id,
+                &owner_principal.id,
+                "unknown@example.com",
+                NOW + 5,
+            )
+            .unwrap();
+        assert!(!unknown.removed);
+        assert_eq!(unknown.revoked_git_credentials, 0);
     }
 
     #[test]

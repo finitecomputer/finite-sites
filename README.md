@@ -147,6 +147,21 @@ cd finitechat-native
 git push origin main
 ```
 
+Owners can remove a Project Collaborator through the same agent-facing
+surface. This revokes that Principal's active Git Credentials for the Project
+and is safe to replay:
+
+```sh
+fsite project collaborator remove finitechat-native --email editor@example.com --output json
+```
+
+Project Repository access is separate from output Visibility. If the email
+should also lose view access to a site output, remove the Share row too:
+
+```sh
+fsite share finitechat-native-mockup --remove-email editor@example.com
+```
+
 Source Snapshot editing remains available for older site-first publishes.
 Owners can label a site with an owner email, publish source, and grant an
 editor:

@@ -301,6 +301,73 @@ fn git_credential_requires_verified_project_collaborator() {
 }
 
 #[test]
+fn project_collaborator_remove_revokes_credentials_and_replays() {
+    let mut fx = fixture();
+    fx.engine
+        .apply_project(
+            OWNER,
+            &project_request(false),
+            "https://git.finite.chat/finitechat-native.git".to_string(),
+            NOW,
+        )
+        .unwrap();
+    verify_email_key(&mut fx.engine, "skyler@example.com", OTHER_OWNER);
+    let credential = fx
+        .engine
+        .mint_git_credential(
+            OTHER_OWNER,
+            "finitechat-native",
+            "skyler@example.com",
+            "https://git.finite.chat/finitechat-native.git".to_string(),
+            NOW + 2,
+        )
+        .unwrap();
+
+    let stranger = fx.engine.remove_project_collaborator(
+        OTHER_OWNER,
+        "finitechat-native",
+        "skyler@example.com",
+        NOW + 3,
+    );
+    assert!(matches!(stranger, Err(EngineError::NotAuthorized)));
+
+    let removed = fx
+        .engine
+        .remove_project_collaborator(OWNER, "finitechat-native", "skyler@example.com", NOW + 4)
+        .unwrap();
+    assert_eq!(removed.project_slug, "finitechat-native");
+    assert_eq!(removed.email, "skyler@example.com");
+    assert!(removed.removed);
+    assert_eq!(removed.revoked_git_credentials, 1);
+
+    let old_credential = fx.engine.authenticate_git_credential(
+        &credential.username,
+        &credential.password,
+        "finitechat-native",
+        NOW + 5,
+    );
+    assert!(matches!(old_credential, Err(EngineError::NotAuthorized)));
+
+    let new_credential = fx.engine.mint_git_credential(
+        OTHER_OWNER,
+        "finitechat-native",
+        "skyler@example.com",
+        "https://git.finite.chat/finitechat-native.git".to_string(),
+        NOW + 6,
+    );
+    assert!(matches!(new_credential, Err(EngineError::NotAuthorized)));
+
+    let replay = fx
+        .engine
+        .remove_project_collaborator(OWNER, "finitechat-native", "skyler@example.com", NOW + 7)
+        .unwrap();
+    assert_eq!(replay.project_slug, "finitechat-native");
+    assert_eq!(replay.email, "skyler@example.com");
+    assert!(!replay.removed);
+    assert_eq!(replay.revoked_git_credentials, 0);
+}
+
+#[test]
 fn project_output_version_replays_by_git_ref_event_id_after_ack_crash() {
     let mut fx = fixture();
     let created = fx

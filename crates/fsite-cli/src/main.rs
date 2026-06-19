@@ -27,7 +27,8 @@ use sha2::Digest as _;
 use thiserror::Error;
 
 use finitesites_proto::dto::{
-    EditorsRequest, GitAuthRequest, ProjectApplyRequest, SharingRequest, SourceSnapshotRequest,
+    EditorsRequest, GitAuthRequest, ProjectApplyRequest, ProjectCollaboratorRemoveRequest,
+    SharingRequest, SourceSnapshotRequest,
 };
 use finitesites_proto::limits::MAX_EMAILS_PER_SHARING_REQUEST;
 use finitesites_proto::project_config::parse_project_config_toml;
@@ -121,6 +122,7 @@ fn usage() -> String {
      fsite email-redeem EMAIL TOKEN\n  fsite claim NAME [--owner-email EMAIL]\n  \
      fsite describe [workflow NAME] [--output json]\n  \
      fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n  \
+     fsite project collaborator remove PROJECT --email EMAIL [--output json]\n  \
      fsite auth git PROJECT --email EMAIL [--output json]\n  \
      fsite publish NAME PATH [--spa] [--source PATH] [--owner-email EMAIL] [--email EMAIL]\n  \
      fsite publish-app NAME PATH --start \"CMD\"\n  \
@@ -144,15 +146,23 @@ fn email_redeem_help() -> &'static str {
 }
 
 fn describe_help() -> &'static str {
-    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: project-config, initial-project-publish, edit-shared-project, grant-collaborator."
+    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: project-config, initial-project-publish, edit-shared-project, grant-collaborator, remove-collaborator."
 }
 
 fn project_help() -> &'static str {
-    "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n\nCreate or update a Project Repository and finite.toml-described Project Outputs. See: fsite describe workflow project-config --output json"
+    "usage:\n  fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n  fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nCreate/update Project Repositories and manage Project Collaborators. See: fsite describe workflow project-config --output json"
 }
 
 fn project_apply_help() -> &'static str {
     "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n\nReads Project apply JSON, validates it, optionally writes finite.toml, and creates/updates Project Outputs. Use --dry-run before mutating. Use --output json for agent workflows."
+}
+
+fn project_collaborator_help() -> &'static str {
+    "usage: fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nRemove a Project Collaborator by External Principal email and revoke that Principal's active Git Credentials for this Project."
+}
+
+fn project_collaborator_remove_help() -> &'static str {
+    "usage: fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nOwner-authenticated revocation. Safe to replay: removed=false means the collaborator was already inactive or unknown."
 }
 
 fn auth_help() -> &'static str {
@@ -264,6 +274,11 @@ fn describe_commands() -> serde_json::Value {
                 "usage": "fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]"
             },
             {
+                "name": "project collaborator remove",
+                "summary": "Remove a Project Collaborator and revoke active Git Credentials for that Principal.",
+                "usage": "fsite project collaborator remove PROJECT --email EMAIL [--output json]"
+            },
+            {
                 "name": "auth git",
                 "summary": "Mint a scoped HTTPS Git Credential after email verification.",
                 "usage": "fsite auth git PROJECT --email EMAIL [--output json]"
@@ -283,7 +298,8 @@ fn describe_commands() -> serde_json::Value {
             "project-config",
             "initial-project-publish",
             "edit-shared-project",
-            "grant-collaborator"
+            "grant-collaborator",
+            "remove-collaborator"
         ]
     })
 }
@@ -332,9 +348,18 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
                 "Run fsite project apply --json project.json --output json after confirming the plan."
             ]
         }),
+        "remove-collaborator" => serde_json::json!({
+            "name": "remove-collaborator",
+            "steps": [
+                "Use the Project owner identity, not the collaborator email key.",
+                "Run fsite project collaborator remove PROJECT --email COLLABORATOR_EMAIL --output json.",
+                "Check removed and revoked_git_credentials in the JSON response.",
+                "If the Project Output should no longer be viewable by that email, also run fsite share SITE_NAME --remove-email COLLABORATOR_EMAIL."
+            ]
+        }),
         other => {
             return Err(CliError::Usage(format!(
-                "unknown workflow `{other}` (project-config|initial-project-publish|edit-shared-project|grant-collaborator)"
+                "unknown workflow `{other}` (project-config|initial-project-publish|edit-shared-project|grant-collaborator|remove-collaborator)"
             )));
         }
     };
@@ -348,10 +373,97 @@ fn project_command(args: &[String]) -> Result<(), CliError> {
     match subcommand.as_str() {
         value if is_help_arg(value) => print_help(project_help()),
         "apply" => project_apply(rest),
+        "collaborator" => project_collaborator_command(rest),
         other => Err(CliError::Usage(format!(
             "unknown project command `{other}`"
         ))),
     }
+}
+
+fn project_collaborator_command(args: &[String]) -> Result<(), CliError> {
+    let Some((subcommand, rest)) = args.split_first() else {
+        return Err(CliError::Usage(project_collaborator_help().to_string()));
+    };
+    match subcommand.as_str() {
+        value if is_help_arg(value) => print_help(project_collaborator_help()),
+        "remove" => project_collaborator_remove(rest),
+        other => Err(CliError::Usage(format!(
+            "unknown project collaborator command `{other}`"
+        ))),
+    }
+}
+
+fn project_collaborator_remove(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(project_collaborator_remove_help());
+    }
+    let mut project: Option<String> = None;
+    let mut email: Option<String> = None;
+    let mut output_json = false;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--email" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
+                email = Some(value.clone());
+                index += 2;
+            }
+            "--output" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
+                }
+                output_json = true;
+                index += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            value => {
+                if project.is_some() {
+                    return Err(CliError::Usage(
+                        project_collaborator_remove_help().to_string(),
+                    ));
+                }
+                project = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    let project =
+        project.ok_or_else(|| CliError::Usage(project_collaborator_remove_help().to_string()))?;
+    let email =
+        email.ok_or_else(|| CliError::Usage(project_collaborator_remove_help().to_string()))?;
+    let identity = keys::load_or_create_identity()?;
+    let client = api::Client::from_env();
+    let response = client.remove_project_collaborator(
+        &identity,
+        &project,
+        &ProjectCollaboratorRemoveRequest { email },
+    )?;
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("response serializes")
+        );
+    } else {
+        println!("project: {}", response.project_slug);
+        println!("email:   {}", response.email);
+        println!("removed: {}", response.removed);
+        println!(
+            "revoked git credentials: {}",
+            response.revoked_git_credentials
+        );
+    }
+    Ok(())
 }
 
 fn project_apply(args: &[String]) -> Result<(), CliError> {
@@ -1154,6 +1266,8 @@ mod tests {
             &["describe", "--help"],
             &["project", "--help"],
             &["project", "apply", "--help"],
+            &["project", "collaborator", "--help"],
+            &["project", "collaborator", "remove", "--help"],
             &["auth", "--help"],
             &["auth", "git", "--help"],
             &["claim", "--help"],

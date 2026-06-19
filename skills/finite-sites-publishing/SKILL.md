@@ -98,6 +98,21 @@ git push origin main
 Pushing the configured Deploy Branch creates a Version from committed bytes.
 Finite Sites does not run builds.
 
+To remove a Project Collaborator, use the Project owner identity and revoke
+through `fsite`:
+
+```bash
+fsite project collaborator remove PROJECT --email editor@example.com --output json
+```
+
+Check `removed` and `revoked_git_credentials` in the JSON response. The
+command is replay-safe. If that email should also lose view access to a
+Project Output, remove the Share row separately:
+
+```bash
+fsite share SITE_NAME --remove-email editor@example.com
+```
+
 ## Source Snapshot Workflow
 
 Use this for older site-first publishes or when Project Repositories are not
