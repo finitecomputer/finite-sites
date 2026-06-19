@@ -11,7 +11,7 @@
 //!   fsite share NAME [--shared|--private] [--public --yes-public]
 //!                    [--add-email E]... [--remove-email E]...
 //!
-//! Server address comes from FINITE_SITES_API (default http://127.0.0.1:8787).
+//! Server address comes from FINITE_SITES_API (default https://api.finite.chat).
 
 mod api;
 mod bundle;

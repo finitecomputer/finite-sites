@@ -21,6 +21,15 @@ pub struct Client {
     base_url: String,
 }
 
+const DEFAULT_API_URL: &str = "https://api.finite.chat";
+
+fn base_url_from_env_value(value: Option<String>) -> String {
+    value
+        .unwrap_or_else(|| DEFAULT_API_URL.to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
 fn now_unix() -> u64 {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     assert!(now > 0);
@@ -29,11 +38,8 @@ fn now_unix() -> u64 {
 
 impl Client {
     pub fn from_env() -> Client {
-        let base_url = std::env::var("FINITE_SITES_API")
-            .unwrap_or_else(|_| "http://127.0.0.1:8787".to_string());
-        Client {
-            base_url: base_url.trim_end_matches('/').to_string(),
-        }
+        let base_url = base_url_from_env_value(std::env::var("FINITE_SITES_API").ok());
+        Client { base_url }
     }
 
     /// Sign and send one request; decode the JSON response or surface the
@@ -378,5 +384,19 @@ fn content_type_for_body(path: &str) -> &'static str {
         "application/octet-stream"
     } else {
         "application/json"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_api_is_the_default() {
+        assert_eq!(base_url_from_env_value(None), "https://api.finite.chat");
+        assert_eq!(
+            base_url_from_env_value(Some("http://127.0.0.1:8787/".to_string())),
+            "http://127.0.0.1:8787"
+        );
     }
 }

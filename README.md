@@ -66,11 +66,8 @@ Or build it from source:
 cargo install --git https://github.com/finitecomputer/finite-sites --package fsite-cli --bin fsite
 ```
 
-For production Finite Sites, point the CLI at the public API:
-
-```sh
-export FINITE_SITES_API=https://api.finite.chat
-```
+The CLI defaults to production Finite Sites at `https://api.finite.chat`.
+Set `FINITE_SITES_API` only when targeting a local or self-hosted server.
 
 ## Local quickstart
 
@@ -79,6 +76,7 @@ export FINITE_SITES_API=https://api.finite.chat
 cargo run -p finitesitesd -- serve --data .dev-data
 
 # 2. in another shell: create an identity and grant publishing access
+export FINITE_SITES_API=http://127.0.0.1:8787
 cargo run -p fsite-cli --bin fsite -- whoami
 cargo run -p finitesitesd -- allow --data .dev-data <npub from whoami> --note me
 

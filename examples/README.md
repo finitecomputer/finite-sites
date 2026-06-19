@@ -14,8 +14,6 @@ The fixture grants `skyler@example.com` as the bootstrap editor. Replace that
 email before applying if a different External Principal should clone and push.
 
 ```sh
-export FINITE_SITES_API=https://api.finite.chat
-
 fsite project apply \
   --json examples/project-applies/finitechat-native-mockup.json \
   --dry-run \

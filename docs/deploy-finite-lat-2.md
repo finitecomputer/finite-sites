@@ -104,8 +104,9 @@ sudo -u finite-sites finitesitesd allow --data /var/lib/finite-sites <npub> --no
 
 Agent runtimes (on finite-lat-1) need two things staged by
 `prepare-runtime-template` (finitecomputer side): the `fsite` binary on
-PATH with `FINITE_SITES_API=https://api.finite.chat`, and the
-`finite-sites-publishing` skill from `skills/`.
+PATH, and the `finite-sites-publishing` skill from `skills/`. The released
+CLI defaults to `https://api.finite.chat`; set `FINITE_SITES_API` only for a
+local or self-hosted API.
 
 ## 4b. Tier-2 app hosting (installed 2026-06-10)
 
@@ -221,8 +222,6 @@ Replace that email before applying if another External Principal should mint a
 Git Credential and push.
 
 ```sh
-export FINITE_SITES_API=https://api.finite.chat
-
 fsite project apply \
   --json examples/project-applies/finitechat-native-mockup.json \
   --dry-run \

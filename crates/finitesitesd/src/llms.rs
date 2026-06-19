@@ -4,11 +4,25 @@
 //! it when the active Version has no user-authored `/llms.txt`.
 
 const FSITE_REPOSITORY_URL: &str = env!("CARGO_PKG_REPOSITORY");
+const DEFAULT_API_URL: &str = "https://api.finite.chat";
+
+fn api_configuration_text(api_url: &str) -> String {
+    let normalized = api_url.trim_end_matches('/');
+    if normalized == DEFAULT_API_URL {
+        return format!(
+            "The fsite CLI defaults to {DEFAULT_API_URL}; no API environment variable is needed.\n"
+        );
+    }
+    format!(
+        "Configure this non-default API before running fsite:\n\nexport FINITE_SITES_API=\"{normalized}\"\n"
+    )
+}
 
 pub fn generated_llms_txt(site_name: &str, site_url: &str, api_url: &str) -> String {
     assert!(!site_name.is_empty());
     assert!(!site_url.is_empty());
     assert!(!api_url.is_empty());
+    let api_configuration = api_configuration_text(api_url);
     format!(
         "\
 # Finite Sites Editing Instructions
@@ -27,9 +41,7 @@ Install the fsite CLI:
 - Release assets are named fsite-linux-x86_64.tar.gz, fsite-macos-x86_64.tar.gz, and fsite-macos-aarch64.tar.gz
 - Or build from source with: cargo install --git {FSITE_REPOSITORY_URL} --package fsite-cli --bin fsite
 
-Configure the API:
-
-export FINITE_SITES_API=\"{api_url}\"
+{api_configuration}
 
 Verify this machine for the editor email:
 
@@ -73,6 +85,7 @@ pub fn generated_project_llms_txt(
     assert!(!api_url.is_empty());
     assert!(!project_slug.is_empty());
     assert!(!git_remote_url.is_empty());
+    let api_configuration = api_configuration_text(api_url);
     format!(
         "\
 # Finite Sites Project Editing Instructions
@@ -96,9 +109,7 @@ Install the fsite CLI:
 - Release assets are named fsite-linux-x86_64.tar.gz, fsite-macos-x86_64.tar.gz, and fsite-macos-aarch64.tar.gz
 - Or build from source with: cargo install --git {FSITE_REPOSITORY_URL} --package fsite-cli --bin fsite
 
-Configure the API:
-
-export FINITE_SITES_API=\"{api_url}\"
+{api_configuration}
 
 Verify this machine for the editor email if it is not already verified:
 
@@ -150,6 +161,8 @@ mod tests {
         assert!(text.contains("fsite email-login YOUR_EDITOR_EMAIL"));
         assert!(text.contains("fsite source pull demo ./site-source --email YOUR_EDITOR_EMAIL"));
         assert!(text.contains("https://github.com/finitecomputer/finite-sites/releases/latest"));
+        assert!(text.contains("no API environment variable is needed"));
+        assert!(!text.contains("export FINITE_SITES_API"));
         assert!(!text.contains("skyler"));
         assert!(!text.contains("paul"));
     }
@@ -173,6 +186,23 @@ mod tests {
         );
         assert!(text.contains("git clone https://git.finite.chat/demo-project.git"));
         assert!(text.contains("git push origin main"));
+        assert!(!text.contains("export FINITE_SITES_API"));
         assert!(!text.contains("fsite source pull"));
+    }
+
+    #[test]
+    fn generated_text_configures_non_default_apis() {
+        let text = generated_project_llms_txt(
+            "demo",
+            "http://demo.sites.localhost:8787/",
+            "http://127.0.0.1:8787",
+            "demo-project",
+            "http://git.sites.localhost:8787/demo-project.git",
+            "site",
+            "main",
+            "dist",
+        );
+        assert!(text.contains("Configure this non-default API before running fsite"));
+        assert!(text.contains("export FINITE_SITES_API=\"http://127.0.0.1:8787\""));
     }
 }

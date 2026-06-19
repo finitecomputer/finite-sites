@@ -21,8 +21,8 @@ issue. Normal publishing happens only through `fsite`.
 
 ## Prerequisites
 
-- `fsite` is available in the runtime and `FINITE_SITES_API` points at the
-  Finite Sites server.
+- `fsite` is available in the runtime. It defaults to the hosted Finite Sites
+  API; set `FINITE_SITES_API` only for a local or self-hosted server.
 - The site can be exported as static files (a final build output directory
   such as `dist/` — never a source tree).
 - The requested name is a lowercase DNS label of 3–63 characters, such as
