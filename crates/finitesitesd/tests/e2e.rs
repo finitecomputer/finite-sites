@@ -6,8 +6,10 @@
 // HTTP statuses; its size does not matter in a test binary.
 #![allow(clippy::result_large_err)]
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -16,8 +18,12 @@ use finitesites_blob::BlobStore;
 use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::dto::{
     ClaimRequest, ClaimResponse, EditorsRequest, EmailLoginRequest, EmailLoginResponse,
-    EmailRedeemRequest, EmailRedeemResponse, PublishBeginRequest, PublishBeginResponse,
-    PublishFinalizeResponse, SharingRequest, SharingResponse, SourceSnapshotRequest,
+    EmailRedeemRequest, EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectApplyRequest,
+    ProjectApplyResponse, ProjectCollaboratorSpec, PublishBeginRequest, PublishBeginResponse,
+    PublishFinalizeResponse, SharingRequest, SharingResponse, SiteSummary, SourceSnapshotRequest,
+};
+use finitesites_proto::project_config::{
+    ProjectConfig, ProjectOutputConfig, ProjectOutputKind, ProjectSection,
 };
 use finitesites_proto::{ManifestFile, PublishManifest, hex, nip98};
 use finitesites_store::Store;
@@ -103,6 +109,7 @@ impl TestServer {
             listen: addr,
             base_domain: BASE_DOMAIN.to_string(),
             api_url: format!("http://127.0.0.1:{}", addr.port()),
+            git_base_url: format!("http://git.{BASE_DOMAIN}:{}", addr.port()),
             site_url_scheme: "http".to_string(),
             site_url_port: Some(addr.port()),
             mail_provider: None,
@@ -279,6 +286,65 @@ fn publish_static_version(
             )
             .unwrap(),
     )
+}
+
+fn run_git(args: &[&str], cwd: Option<&Path>) {
+    let mut command = Command::new("git");
+    command.args(args);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn run_git_expect_failure(args: &[&str], cwd: Option<&Path>) {
+    let mut command = Command::new("git");
+    command.args(args);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "git {:?} unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn project_apply_request(dry_run: bool) -> ProjectApplyRequest {
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "mockup".to_string(),
+        ProjectOutputConfig {
+            kind: ProjectOutputKind::Site,
+            site_name: "finitechat-native-mockup".to_string(),
+            branch: "main".to_string(),
+            path: ".".to_string(),
+            spa: false,
+        },
+    );
+    ProjectApplyRequest {
+        config: ProjectConfig {
+            project: ProjectSection {
+                slug: "finitechat-native".to_string(),
+            },
+            outputs,
+        },
+        dry_run,
+        collaborators: vec![ProjectCollaboratorSpec {
+            email: "skyler@example.com".to_string(),
+            role: "editor".to_string(),
+        }],
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -552,6 +618,519 @@ async fn full_publish_share_and_view_flow() {
                 .unwrap()
                 .contains("No site lives here")
         );
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_apply_and_git_auth_flow() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let dry_body = serde_json::to_vec(&project_apply_request(true)).unwrap();
+        let dry_run: ProjectApplyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/apply",
+                    Some(&dry_body),
+                )
+                .unwrap(),
+        );
+        assert!(dry_run.dry_run);
+        assert!(dry_run.created);
+        assert_eq!(dry_run.project_id, None);
+        assert_eq!(
+            dry_run.git_remote_url,
+            format!(
+                "http://git.{BASE_DOMAIN}:{}/finitechat-native.git",
+                server.port()
+            )
+        );
+        assert!(dry_run.finite_toml.contains("[outputs.mockup]"));
+
+        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let created: ProjectApplyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/apply",
+                    Some(&body),
+                )
+                .unwrap(),
+        );
+        assert!(!created.dry_run);
+        assert!(created.created);
+        assert!(created.project_id.is_some());
+        assert!(created.outputs[0].created);
+        assert_eq!(created.outputs[0].site_name, "finitechat-native-mockup");
+
+        let replay: ProjectApplyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/apply",
+                    Some(&body),
+                )
+                .unwrap(),
+        );
+        assert!(!replay.created);
+        assert!(!replay.outputs[0].created);
+        assert_eq!(replay.project_id, created.project_id);
+
+        let bad_auth = serde_json::to_vec(&GitAuthRequest {
+            email: "skyler@example.com".into(),
+        })
+        .unwrap();
+        let unverified = server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/git-auth",
+                Some(&bad_auth),
+            )
+            .unwrap_err();
+        assert!(matches!(unverified, ureq::Error::Status(403, _)));
+
+        let login_body = serde_json::to_vec(&EmailLoginRequest {
+            email: "skyler@example.com".into(),
+        })
+        .unwrap();
+        let login: EmailLoginResponse = server
+            .agent
+            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+            .set("Content-Type", "application/json")
+            .send_bytes(&login_body)
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(login.email, "skyler@example.com");
+        let token = outbox_email_token(&server.outbox);
+        clear_outbox(&server.outbox);
+
+        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
+            email: "skyler@example.com".into(),
+            token,
+        })
+        .unwrap();
+        let redeemed: EmailRedeemResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/email-auth/redeem",
+                    Some(&redeem_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(redeemed.email, "skyler@example.com");
+
+        let credential: GitAuthResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/git-auth",
+                    Some(&bad_auth),
+                )
+                .unwrap(),
+        );
+        assert_eq!(credential.project_slug, "finitechat-native");
+        assert_eq!(credential.username, credential.credential_id);
+        assert_eq!(credential.password.len(), 64);
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_http_clone_and_push_with_minted_credential() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+
+    let task =
+        tokio::task::spawn_blocking(move || {
+            let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+            let created: ProjectApplyResponse = json_body(
+                server
+                    .signed(
+                        &user_secret(),
+                        "POST",
+                        "/api/v1/projects/apply",
+                        Some(&body),
+                    )
+                    .unwrap(),
+            );
+
+            let login_body = serde_json::to_vec(&EmailLoginRequest {
+                email: "skyler@example.com".into(),
+            })
+            .unwrap();
+            server
+                .agent
+                .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+                .set("Content-Type", "application/json")
+                .send_bytes(&login_body)
+                .unwrap();
+            let token = outbox_email_token(&server.outbox);
+            clear_outbox(&server.outbox);
+            let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
+                email: "skyler@example.com".into(),
+                token,
+            })
+            .unwrap();
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/email-auth/redeem",
+                    Some(&redeem_body),
+                )
+                .unwrap();
+
+            let auth_body = serde_json::to_vec(&GitAuthRequest {
+                email: "skyler@example.com".into(),
+            })
+            .unwrap();
+            let credential: GitAuthResponse = json_body(
+                server
+                    .signed(
+                        &stranger_secret(),
+                        "POST",
+                        "/api/v1/projects/finitechat-native/git-auth",
+                        Some(&auth_body),
+                    )
+                    .unwrap(),
+            );
+
+            let dir = tempfile::tempdir().unwrap();
+            let remote = format!(
+                "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+                credential.username,
+                credential.password,
+                server.port()
+            );
+            let host_header = format!("Host: git.{BASE_DOMAIN}:{}", server.port());
+            run_git(
+                &[
+                    "-c",
+                    &format!("http.extraHeader={host_header}"),
+                    "clone",
+                    &remote,
+                    "repo",
+                ],
+                Some(dir.path()),
+            );
+            let repo = dir.path().join("repo");
+            run_git(&["checkout", "-b", "main"], Some(&repo));
+            std::fs::write(repo.join("finite.toml"), created.finite_toml).unwrap();
+            std::fs::write(repo.join("index.html"), "<h1>from git</h1>").unwrap();
+            run_git(&["add", "finite.toml", "index.html"], Some(&repo));
+            run_git(
+                &[
+                    "-c",
+                    "user.email=skyler@example.com",
+                    "-c",
+                    "user.name=Skyler Bot",
+                    "commit",
+                    "-m",
+                    "Initial project output",
+                ],
+                Some(&repo),
+            );
+            run_git(
+                &[
+                    "-c",
+                    &format!("http.extraHeader={host_header}"),
+                    "push",
+                    "origin",
+                    "main",
+                ],
+                Some(&repo),
+            );
+
+            let summary: SiteSummary = json_body(
+                server
+                    .signed(
+                        &user_secret(),
+                        "GET",
+                        "/api/v1/sites/finitechat-native-mockup",
+                        None,
+                    )
+                    .unwrap(),
+            );
+            assert_eq!(summary.active_version, Some(1));
+
+            let llms = server
+                .site_get("finitechat-native-mockup", "/llms.txt", server.port())
+                .unwrap()
+                .into_string()
+                .unwrap();
+            assert!(llms.contains("Project: finitechat-native"));
+            assert!(llms.contains(
+                "fsite auth git finitechat-native --email YOUR_EDITOR_EMAIL --output json"
+            ));
+            assert!(llms.contains("git push origin main"));
+        });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_push_to_non_deploy_branch_does_not_publish() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let created: ProjectApplyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/apply",
+                    Some(&body),
+                )
+                .unwrap(),
+        );
+
+        let login_body = serde_json::to_vec(&EmailLoginRequest {
+            email: "skyler@example.com".into(),
+        })
+        .unwrap();
+        server
+            .agent
+            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+            .set("Content-Type", "application/json")
+            .send_bytes(&login_body)
+            .unwrap();
+        let token = outbox_email_token(&server.outbox);
+        clear_outbox(&server.outbox);
+        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
+            email: "skyler@example.com".into(),
+            token,
+        })
+        .unwrap();
+        server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/email-auth/redeem",
+                Some(&redeem_body),
+            )
+            .unwrap();
+
+        let auth_body = serde_json::to_vec(&GitAuthRequest {
+            email: "skyler@example.com".into(),
+        })
+        .unwrap();
+        let credential: GitAuthResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/git-auth",
+                    Some(&auth_body),
+                )
+                .unwrap(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let remote = format!(
+            "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+            credential.username,
+            credential.password,
+            server.port()
+        );
+        let host_header = format!("Host: git.{BASE_DOMAIN}:{}", server.port());
+        let bad_remote = format!(
+            "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+            credential.username,
+            "badpassword",
+            server.port()
+        );
+        run_git_expect_failure(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "ls-remote",
+                &bad_remote,
+            ],
+            Some(dir.path()),
+        );
+        run_git(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "clone",
+                &remote,
+                "repo",
+            ],
+            Some(dir.path()),
+        );
+        let repo = dir.path().join("repo");
+        run_git(&["checkout", "-b", "notes"], Some(&repo));
+        std::fs::write(repo.join("finite.toml"), created.finite_toml).unwrap();
+        std::fs::write(repo.join("index.html"), "<h1>not deployed</h1>").unwrap();
+        run_git(&["add", "finite.toml", "index.html"], Some(&repo));
+        run_git(
+            &[
+                "-c",
+                "user.email=skyler@example.com",
+                "-c",
+                "user.name=Skyler Bot",
+                "commit",
+                "-m",
+                "Push non deploy branch",
+            ],
+            Some(&repo),
+        );
+        run_git(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "push",
+                "origin",
+                "notes",
+            ],
+            Some(&repo),
+        );
+
+        let summary: SiteSummary = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "GET",
+                    "/api/v1/sites/finitechat-native-mockup",
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(summary.active_version, None);
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_push_with_missing_output_path_does_not_publish() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let created: ProjectApplyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/apply",
+                    Some(&body),
+                )
+                .unwrap(),
+        );
+
+        let login_body = serde_json::to_vec(&EmailLoginRequest {
+            email: "skyler@example.com".into(),
+        })
+        .unwrap();
+        server
+            .agent
+            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+            .set("Content-Type", "application/json")
+            .send_bytes(&login_body)
+            .unwrap();
+        let token = outbox_email_token(&server.outbox);
+        clear_outbox(&server.outbox);
+        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
+            email: "skyler@example.com".into(),
+            token,
+        })
+        .unwrap();
+        server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/email-auth/redeem",
+                Some(&redeem_body),
+            )
+            .unwrap();
+        let auth_body = serde_json::to_vec(&GitAuthRequest {
+            email: "skyler@example.com".into(),
+        })
+        .unwrap();
+        let credential: GitAuthResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/git-auth",
+                    Some(&auth_body),
+                )
+                .unwrap(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let remote = format!(
+            "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+            credential.username,
+            credential.password,
+            server.port()
+        );
+        let host_header = format!("Host: git.{BASE_DOMAIN}:{}", server.port());
+        run_git(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "clone",
+                &remote,
+                "repo",
+            ],
+            Some(dir.path()),
+        );
+        let repo = dir.path().join("repo");
+        run_git(&["checkout", "-b", "main"], Some(&repo));
+        let bad_config = created
+            .finite_toml
+            .replace("path = \".\"", "path = \"dist\"");
+        std::fs::write(repo.join("finite.toml"), bad_config).unwrap();
+        std::fs::write(repo.join("index.html"), "<h1>not deployed</h1>").unwrap();
+        run_git(&["add", "finite.toml", "index.html"], Some(&repo));
+        run_git(
+            &[
+                "-c",
+                "user.email=skyler@example.com",
+                "-c",
+                "user.name=Skyler Bot",
+                "commit",
+                "-m",
+                "Missing output path",
+            ],
+            Some(&repo),
+        );
+        run_git(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "push",
+                "origin",
+                "main",
+            ],
+            Some(&repo),
+        );
+
+        let summary: SiteSummary = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "GET",
+                    "/api/v1/sites/finitechat-native-mockup",
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(summary.active_version, None);
     });
     task.await.unwrap();
 }

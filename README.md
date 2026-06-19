@@ -20,8 +20,13 @@ substrate is now finite-owned storage behind one wildcard domain.
   editor emails. Verified email keys can publish without exposing npubs.
 - **Source snapshots**: publishes can attach a bounded source `tar.gz` so a
   later editor can pull source, change it, and republish with updated source.
+- **Project Repositories**: a Project is a git repo plus one or more
+  `finite.toml` Project Outputs. Standard git clone/push works through
+  `git-http-backend` behind Finite auth, and pushes to a Deploy Branch create
+  immutable Versions from committed bytes.
 - **Agent handoff**: editable static sites with source get a generated
-  `/llms.txt` unless the user published that path themselves.
+  `/llms.txt` unless the user published that path themselves. Project-backed
+  sites get git-first instructions.
 - **Publish grant cache**: only npubs with an active operator or Core grant can
   claim/publish. The deployed allowlist commands manage operator grants;
   payments/Core sync are the next source.
@@ -92,8 +97,57 @@ cargo run -p fsite-cli --bin fsite -- share hello --public --yes-public
 
 `just dev`, `just test`, `just lint` wrap the common loops.
 
+## Project shape
+
+Finite projects should be organized so the source remains useful before and
+after a website exists. Start with durable data when that is the foundation;
+add logic around that data when the project needs computation; produce a
+website, PDF, or other output only when there is something useful to present.
+
+The deployed site is a Deploy Output: committed bytes selected from the
+Project Repository by `finite.toml` and served as a Version. Finite Sites
+validates and serves committed bytes; agents own any build step that produces
+those bytes.
+
 ## Collaborative editing
 
+Project Repositories are the preferred collaboration path. Create or update
+the Project and its site output through agent-safe JSON:
+
+```sh
+fsite describe workflow project-config --output json
+fsite project apply --json project.json --dry-run --output json
+fsite project apply --json project.json --output json
+```
+
+Minimal `finite.toml`:
+
+```toml
+[project]
+slug = "finitechat-native"
+
+[outputs.mockup]
+kind = "site"
+site_name = "finitechat-native-mockup"
+branch = "main"
+path = "."
+spa = false
+```
+
+An editor verifies their email, mints a scoped Git Credential, clones, edits,
+commits deploy bytes, and pushes the Deploy Branch:
+
+```sh
+fsite email-login editor@example.com
+fsite email-redeem editor@example.com TOKEN_FROM_EMAIL
+fsite auth git finitechat-native --email editor@example.com --output json
+git clone https://git.finite.chat/finitechat-native.git
+cd finitechat-native
+# edit, test, build if needed, commit deploy bytes
+git push origin main
+```
+
+Source Snapshot editing remains available for older site-first publishes.
 Owners can label a site with an owner email, publish source, and grant an
 editor:
 
@@ -120,6 +174,19 @@ virtual `/llms.txt` with these instructions when the active version did not
 publish `/llms.txt` itself. That lets an owner send a site link to another
 person and have their agent discover the edit flow without scraping rendered
 HTML as source.
+
+Pushing to a Project Deploy Branch updates committed output bytes; Finite
+Sites does not run builds.
+
+## Agent-first CLI
+
+Agents should be able to learn `fsite` by interrogating `fsite` itself. Every
+capability exposed by the CLI should be discoverable through machine-readable
+help or describe commands, and every mutating project command should support
+structured JSON input, structured JSON output, and dry-run validation.
+
+Human-friendly commands remain useful, but they should be thin convenience
+paths over the same agent-safe operations.
 
 ## Production shape
 

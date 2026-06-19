@@ -52,6 +52,11 @@ pub const VIEWER_COOKIE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 /// full manifest: 2k files * ~600 bytes/entry stays under this with slack.
 pub const MAX_API_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
+/// Git smart HTTP receives pack files. This is deliberately larger than the
+/// JSON API limit but still bounded so a single push cannot consume unbounded
+/// daemon memory in the first implementation.
+pub const MAX_GIT_HTTP_BODY_BYTES: u64 = 128 * 1024 * 1024;
+
 /// Sharing mutations may add or remove at most this many emails per request.
 pub const MAX_EMAILS_PER_SHARING_REQUEST: u32 = 20;
 
@@ -81,3 +86,30 @@ pub const MAX_START_COMMAND_BYTES: u32 = 1024;
 /// App listen ports are allocated from this range, one per app site.
 pub const APP_PORT_RANGE_START: u16 = 21000;
 pub const APP_PORT_RANGE_END: u16 = 29999;
+
+/// One Project Config can describe multiple outputs later, but milestone 1
+/// stays small enough that validation, deploy reconciliation, and agent error
+/// messages remain inspectable.
+pub const MAX_PROJECT_OUTPUTS: u32 = 16;
+
+/// Project collaboration follows the same Google-Doc-shaped expectation as
+/// site sharing: dozens of people or agents, not a public mailing list.
+pub const MAX_PROJECT_COLLABORATORS: u32 = 50;
+
+/// Project Slugs use DNS-label-sized strings even though they live under the
+/// git host. Keeping them label-shaped makes `git.finite.chat/SLUG.git`
+/// unsurprising and avoids path escaping questions.
+pub const MAX_PROJECT_SLUG_BYTES: u32 = 63;
+
+/// Project Output IDs are table keys inside `finite.toml`, not public DNS
+/// labels. They still stay short so status and workflow JSON are bounded.
+pub const MAX_PROJECT_OUTPUT_ID_BYTES: u32 = 64;
+
+/// Git branch names accepted by Project Config are intentionally narrower
+/// than git's full ref grammar. Agents can use ordinary names like `main` or
+/// `feature/site`, and the server avoids control/path edge cases.
+pub const MAX_PROJECT_BRANCH_BYTES: u32 = 128;
+
+/// Output paths select committed deploy bytes. They are directory paths, not
+/// arbitrary pathspecs, and remain small enough for logs and audit rows.
+pub const MAX_PROJECT_OUTPUT_PATH_BYTES: u32 = 256;

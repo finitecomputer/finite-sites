@@ -25,8 +25,10 @@ In the `finite.chat` zone:
 1. **DNS records** (both Proxied / orange cloud):
    - `A  *    64.34.80.19`
    - `A  api  64.34.80.19`
-   (The apex `finite.chat` is free for marketing/redirect use; sites and the
-   API do not need it.)
+   - optional explicit `A  git  64.34.80.19` if you do not want to rely on
+     the wildcard record for the Git Remote host.
+   (The apex `finite.chat` is free for marketing/redirect use; sites, Git,
+   and the API do not need it.)
 2. **SSL/TLS -> Overview**: set encryption mode to **Full**. The box
    currently serves Caddy-internal certs, which Full accepts. To upgrade to
    **Full (strict)** later: SSL/TLS -> Origin Server -> Create Certificate
@@ -170,6 +172,9 @@ Box-local gates (passed 2026-06-09 with a temporary local `--api-url`):
 - claim → publish → share `examples/hello-site` serves through Caddy.
 - `https://api.finite.chat/` classifies as the API plane, not a site page
   (dispatch regression gate).
+- `https://git.finite.chat/PROJECT.git` routes to the Git plane; an editor
+  can `fsite auth git`, clone, commit, and push `main` through
+  `git-http-backend`.
 - Restarting `finite-saas-sites` loses nothing.
 
 Tier-2 gates (passed 2026-06-10): bun+SQLite, FastHTML (uv inline

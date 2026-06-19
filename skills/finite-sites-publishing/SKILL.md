@@ -45,7 +45,63 @@ human to send the npub to a Finite operator for allowlisting.
 Never print, paste, move, commit, or deploy these files. Ensure `.finite/`
 is gitignored in any repo you touch.
 
-## Workflow
+## Project Shape
+
+Treat a Finite project as source first and output second:
+
+- durable data is the foundation;
+- add logic around that data only when the project needs computation;
+- build a website, PDF, or other user-facing output only when there is
+  something useful to present.
+
+Keep those layers in the Project Repository. The deployed site is a Deploy
+Output: committed bytes selected by `finite.toml` and served as a Version.
+Finite Sites validates and serves the bytes; the agent owns any build step
+that produces them.
+
+## Project Repository Workflow
+
+Prefer this flow for collaborative sites:
+
+1. Learn the schema and workflows from the CLI:
+
+```bash
+fsite describe workflow project-config --output json
+fsite describe workflow initial-project-publish --output json
+fsite describe workflow edit-shared-project --output json
+```
+
+2. Create a project apply JSON that includes `config.project.slug`,
+   `config.outputs`, and any collaborator emails. Validate before mutating:
+
+```bash
+fsite project apply --json project.json --dry-run --output json
+fsite project apply --json project.json --output json
+```
+
+The CLI writes `finite.toml` after a successful non-dry-run apply when the
+file does not already exist. If `finite.toml` exists, it must match the JSON
+config.
+
+3. Editors verify email, mint a scoped Git Credential, and use standard git:
+
+```bash
+fsite email-login editor@example.com
+fsite email-redeem editor@example.com TOKEN_FROM_EMAIL
+fsite auth git PROJECT --email editor@example.com --output json
+git clone https://git.finite.chat/PROJECT.git
+cd PROJECT
+# edit source/data/logic, run tests/builds, commit deploy bytes
+git push origin main
+```
+
+Pushing the configured Deploy Branch creates a Version from committed bytes.
+Finite Sites does not run builds.
+
+## Source Snapshot Workflow
+
+Use this for older site-first publishes or when Project Repositories are not
+available in the target environment.
 
 1. Identify the requested `NAME`. Check what already exists when useful:
 
@@ -116,6 +172,16 @@ fsite publish NAME ./dist --source . --email editor@example.com
 If `https://NAME.finite.chat/llms.txt` exists and is platform-generated, use
 it as the handoff guide. If the project contains its own `llms.txt`, preserve
 it and follow it as project-specific guidance.
+
+Project-backed generated `/llms.txt` uses explicit auth before clone/push
+rather than hidden credential-helper behavior.
+
+## Agent-Safe CLI Direction
+
+Prefer machine-readable `fsite` surfaces when they exist. The CLI should
+document every capability through inspectable commands, not rely on hidden
+external docs. For new project commands, prefer JSON input/output and dry-run
+validation before mutation.
 
 ## Server Apps (tier 2)
 

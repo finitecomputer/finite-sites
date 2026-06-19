@@ -35,13 +35,20 @@ Every mutation needs a positive test and at least one negative/replay test.
   nostr events, direct registry writes, DNS edits, or proxy edits.
 - Use `FINITE_SITES_API=https://api.finite.chat` for production unless the
   task is explicitly local development.
-- For collaborative static sites, publish the built artifact and attach source:
+- For collaborative static sites, prefer Project Repositories:
 
 ```sh
-fsite publish NAME ./dist --source . --email editor@example.com
+fsite describe workflow project-config --output json
+fsite project apply --json project.json --dry-run --output json
+fsite project apply --json project.json --output json
+fsite auth git PROJECT --email editor@example.com --output json
+git clone https://git.finite.chat/PROJECT.git
 ```
 
-- Pull source before editing another person's site:
+- Commit deploy bytes and push the configured Deploy Branch. Finite Sites
+  does not run builds.
+- Source Snapshot editing is the legacy/bootstrap path. Pull source before
+  editing another person's site-first publish:
 
 ```sh
 fsite source pull NAME ./site-source --email editor@example.com

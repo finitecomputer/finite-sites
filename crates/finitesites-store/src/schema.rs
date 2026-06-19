@@ -27,6 +27,40 @@ CREATE TABLE IF NOT EXISTS publish_grants (
 CREATE INDEX IF NOT EXISTS publish_grants_active_pubkey
   ON publish_grants(pubkey) WHERE revoked_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS principals (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('native', 'external')),
+  email TEXT,
+  pubkey TEXT CHECK (pubkey IS NULL OR length(pubkey) = 64),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  CHECK (
+    (kind = 'native' AND pubkey IS NOT NULL AND email IS NULL) OR
+    (kind = 'external' AND email IS NOT NULL AND pubkey IS NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS principals_email_unique
+  ON principals(email) WHERE email IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS principals_pubkey_unique
+  ON principals(pubkey) WHERE pubkey IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS agent_keys (
+  id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
+  label TEXT,
+  verified_at INTEGER NOT NULL,
+  revoked_at INTEGER,
+  created_at INTEGER NOT NULL,
+  CHECK (revoked_at IS NULL OR revoked_at >= verified_at),
+  UNIQUE (principal_id, pubkey)
+);
+
+CREATE INDEX IF NOT EXISTS agent_keys_active
+  ON agent_keys(principal_id, pubkey) WHERE revoked_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS sites (
   id TEXT PRIMARY KEY,
   owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
@@ -42,6 +76,88 @@ CREATE TABLE IF NOT EXISTS sites (
 );
 
 CREATE INDEX IF NOT EXISTS sites_owner ON sites(owner_pubkey, created_at);
+
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  owner_principal_id TEXT NOT NULL REFERENCES principals(id),
+  visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'public')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS projects_owner
+  ON projects(owner_principal_id, created_at);
+
+CREATE TABLE IF NOT EXISTS project_collaborators (
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  role TEXT NOT NULL CHECK (role IN ('owner', 'editor', 'viewer')),
+  added_by_principal_id TEXT REFERENCES principals(id),
+  added_at INTEGER NOT NULL,
+  removed_at INTEGER,
+  PRIMARY KEY (project_id, principal_id),
+  CHECK (removed_at IS NULL OR removed_at >= added_at)
+);
+
+CREATE INDEX IF NOT EXISTS project_collaborators_active
+  ON project_collaborators(project_id, principal_id) WHERE removed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS project_outputs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  output_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('site')),
+  site_id TEXT NOT NULL REFERENCES sites(id),
+  site_name TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  output_path TEXT NOT NULL,
+  spa_fallback INTEGER NOT NULL DEFAULT 0 CHECK (spa_fallback IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (project_id, output_id),
+  UNIQUE (site_id)
+);
+
+CREATE INDEX IF NOT EXISTS project_outputs_project
+  ON project_outputs(project_id, output_id);
+
+CREATE TABLE IF NOT EXISTS git_credentials (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER,
+  revoked_at INTEGER,
+  last_used_at INTEGER,
+  CHECK (expires_at IS NULL OR expires_at > created_at),
+  CHECK (revoked_at IS NULL OR revoked_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS git_credentials_project_principal
+  ON git_credentials(project_id, principal_id) WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS git_ref_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  ref_name TEXT NOT NULL,
+  old_sha TEXT NOT NULL CHECK (length(old_sha) = 40),
+  new_sha TEXT NOT NULL CHECK (length(new_sha) = 40),
+  actor_principal_id TEXT NOT NULL REFERENCES principals(id),
+  actor_agent_key_id TEXT REFERENCES agent_keys(id),
+  git_credential_id TEXT NOT NULL REFERENCES git_credentials(id),
+  project_output_id TEXT REFERENCES project_outputs(id),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'deployed', 'ignored', 'failed')),
+  version_id TEXT REFERENCES versions(id),
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (project_id, ref_name, new_sha)
+);
+
+CREATE INDEX IF NOT EXISTS git_ref_events_pending
+  ON git_ref_events(status, id) WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS name_claims (
   id TEXT PRIMARY KEY,

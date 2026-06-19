@@ -6,9 +6,10 @@ use std::io::Read as _;
 
 use finitesites_proto::dto::{
     ApiErrorBody, ClaimRequest, ClaimResponse, EditorsRequest, EditorsResponse, EmailLoginRequest,
-    EmailLoginResponse, EmailRedeemRequest, EmailRedeemResponse, OwnerEmailRequest,
-    PublishBeginRequest, PublishBeginResponse, PublishFinalizeResponse, SharingRequest,
-    SharingResponse, SiteListResponse, SiteSummary, SourceSnapshotRequest,
+    EmailLoginResponse, EmailRedeemRequest, EmailRedeemResponse, GitAuthRequest, GitAuthResponse,
+    OwnerEmailRequest, ProjectApplyRequest, ProjectApplyResponse, PublishBeginRequest,
+    PublishBeginResponse, PublishFinalizeResponse, SharingRequest, SharingResponse,
+    SiteListResponse, SiteSummary, SourceSnapshotRequest,
 };
 use finitesites_proto::{PublishManifest, nip98};
 
@@ -91,6 +92,30 @@ impl Client {
         })
         .expect("request serializes");
         self.request(user, "POST", "/api/v1/sites/claim", Some(&body))
+    }
+
+    pub fn apply_project(
+        &self,
+        user: &KeyFile,
+        request: &ProjectApplyRequest,
+    ) -> Result<ProjectApplyResponse, CliError> {
+        let body = serde_json::to_vec(request).expect("request serializes");
+        self.request(user, "POST", "/api/v1/projects/apply", Some(&body))
+    }
+
+    pub fn auth_git(
+        &self,
+        key: &KeyFile,
+        project_slug: &str,
+        request: &GitAuthRequest,
+    ) -> Result<GitAuthResponse, CliError> {
+        let body = serde_json::to_vec(request).expect("request serializes");
+        self.request(
+            key,
+            "POST",
+            &format!("/api/v1/projects/{project_slug}/git-auth"),
+            Some(&body),
+        )
     }
 
     pub fn begin_publish(

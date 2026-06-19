@@ -9,6 +9,7 @@
 //! host. The split is decided in one place, by host, before any route
 //! matching.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -23,7 +24,7 @@ use finitesites_engine::Engine;
 use crate::apps::Supervisor;
 use crate::limiter::{RateLimiter, WINDOW_SECONDS};
 use crate::mailer::Mailer;
-use crate::{ServeOptions, api, sites};
+use crate::{ServeOptions, api, git, sites};
 
 pub struct AppState {
     /// The engine owns the registry connection, which is not Sync; one
@@ -36,7 +37,9 @@ pub struct AppState {
     pub apps: Supervisor,
     pub login_limiter: RateLimiter,
     pub api_url: String,
+    pub git_base_url: String,
     pub base_domain: String,
+    pub data_dir: PathBuf,
 }
 
 pub fn now_unix() -> u64 {
@@ -48,19 +51,23 @@ pub fn now_unix() -> u64 {
 #[derive(Clone)]
 struct Dispatcher {
     api: Router,
+    git: Router,
     sites: Router,
     base_domain: String,
     /// Port-stripped host of the configured `--api-url`, checked before the
     /// wildcard so `api.finite.chat` never falls into the sites plane.
     api_host: String,
+    git_host: String,
 }
 
 pub fn build_app(state: Arc<AppState>) -> Router {
     let dispatcher = Dispatcher {
         api: api::router(state.clone()),
+        git: git::router(state.clone()),
         sites: sites::router(state.clone()),
         base_domain: state.base_domain.clone(),
         api_host: host_of_url(&state.api_url),
+        git_host: host_of_url(&state.git_base_url),
     };
     Router::new().fallback(dispatch).with_state(dispatcher)
 }
@@ -68,13 +75,17 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Plane {
     Api,
+    Git,
     Sites,
 }
 
 /// The one routing decision: which plane serves this Host header.
-pub fn plane_for_host(host: &str, api_host: &str, base_domain: &str) -> Plane {
+pub fn plane_for_host(host: &str, api_host: &str, git_host: &str, base_domain: &str) -> Plane {
     if strip_port(host).eq_ignore_ascii_case(api_host) {
         return Plane::Api;
+    }
+    if strip_port(host).eq_ignore_ascii_case(git_host) {
+        return Plane::Git;
     }
     if site_label(host, base_domain).is_some() {
         return Plane::Sites;
@@ -88,8 +99,14 @@ async fn dispatch(State(dispatcher): State<Dispatcher>, request: Request<Body>) 
         .get(HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    let router = match plane_for_host(host, &dispatcher.api_host, &dispatcher.base_domain) {
+    let router = match plane_for_host(
+        host,
+        &dispatcher.api_host,
+        &dispatcher.git_host,
+        &dispatcher.base_domain,
+    ) {
         Plane::Sites => dispatcher.sites.clone(),
+        Plane::Git => dispatcher.git.clone(),
         Plane::Api => dispatcher.api.clone(),
     };
     match router.oneshot(request).await {
@@ -167,14 +184,16 @@ pub async fn serve_on(
         apps,
         login_limiter: RateLimiter::new(WINDOW_SECONDS),
         api_url: options.api_url.clone(),
+        git_base_url: options.git_base_url.clone(),
         base_domain: options.base_domain.clone(),
+        data_dir: options.data_dir.clone(),
     });
     reconcile_apps(&state);
     spawn_idle_reaper(state.clone());
     let app = build_app(state);
     eprintln!(
-        "finitesitesd listening on {} (api: {}, sites: *.{})",
-        options.listen, options.api_url, options.base_domain
+        "finitesitesd listening on {} (api: {}, git: {}, sites: *.{})",
+        options.listen, options.api_url, options.git_base_url, options.base_domain
     );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -274,25 +293,33 @@ mod tests {
         use super::{Plane, plane_for_host};
         let base = "finite.chat";
         let api_host = host_of_url("https://api.finite.chat");
+        let git_host = host_of_url("https://git.finite.chat");
         assert_eq!(
-            plane_for_host("api.finite.chat", &api_host, base),
+            plane_for_host("api.finite.chat", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("api.finite.chat:443", &api_host, base),
+            plane_for_host("api.finite.chat:443", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("API.finite.chat", &api_host, base),
+            plane_for_host("API.finite.chat", &api_host, &git_host, base),
             Plane::Api
         );
         assert_eq!(
-            plane_for_host("hello.finite.chat", &api_host, base),
+            plane_for_host("git.finite.chat", &api_host, &git_host, base),
+            Plane::Git
+        );
+        assert_eq!(
+            plane_for_host("hello.finite.chat", &api_host, &git_host, base),
             Plane::Sites
         );
-        assert_eq!(plane_for_host("finite.chat", &api_host, base), Plane::Api);
         assert_eq!(
-            plane_for_host("127.0.0.1:8787", &api_host, base),
+            plane_for_host("finite.chat", &api_host, &git_host, base),
+            Plane::Api
+        );
+        assert_eq!(
+            plane_for_host("127.0.0.1:8787", &api_host, &git_host, base),
             Plane::Api
         );
     }

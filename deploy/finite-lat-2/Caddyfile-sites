@@ -6,8 +6,9 @@
 # (SSL/TLS -> Origin Server -> Create Certificate), so the zone runs in
 # Full (strict) mode. No ACME, no DNS plugin, no API token on the box.
 #
-# Both blocks proxy to the same finitesitesd process; it splits the API
-# plane from the site plane by Host header itself.
+# Both blocks proxy to the same finitesitesd process; it splits the API,
+# Git, and site planes by Host header itself. `git.finite.chat` is covered by
+# the wildcard block.
 
 api.finite.chat {
 	tls /etc/finite-saas/certs/finite-chat-origin.pem /etc/finite-saas/certs/finite-chat-origin.key

@@ -14,19 +14,22 @@ use thiserror::Error;
 
 use finitesites_blob::{BlobError, BlobStore};
 use finitesites_proto::dto::{
-    EditorsRequest, EditorsResponse, SharingRequest, SharingResponse, SiteSummary,
+    EditorsRequest, EditorsResponse, GitAuthResponse, ProjectApplyRequest,
+    ProjectCollaboratorSummary, ProjectOutputSummary, SharingRequest, SharingResponse, SiteSummary,
     SourceSnapshotInfo, SourceSnapshotRequest,
 };
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_APP_BUNDLE_BYTES, MAX_EDITORS_PER_SITE, MAX_EMAIL_KEYS_PER_EMAIL,
-    MAX_EMAILS_PER_SHARING_REQUEST, MAX_FILE_BYTES, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
-    MAX_SOURCE_SNAPSHOT_BYTES, MAX_START_COMMAND_BYTES, VIEWER_COOKIE_TTL_SECONDS,
+    MAX_EMAILS_PER_SHARING_REQUEST, MAX_FILE_BYTES, MAX_PROJECT_COLLABORATORS, MAX_SHARES_PER_SITE,
+    MAX_SITES_PER_OWNER, MAX_SOURCE_SNAPSHOT_BYTES, MAX_START_COMMAND_BYTES,
+    VIEWER_COOKIE_TTL_SECONDS,
 };
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
-use finitesites_proto::{ProtoError, PublishManifest, hex, ids, names};
+use finitesites_proto::{ManifestFile, ProtoError, PublishManifest, hex, ids, names};
 use finitesites_store::{
-    PublishRecord, PublishStatus, SiteKind, SiteRecord, SiteStatus, SourceSnapshotRecord, Store,
-    StoreError, Visibility,
+    GitRefEventRecord, ProjectApplyStoreOutcome, ProjectCollaboratorApply, ProjectCollaboratorRole,
+    ProjectOutputApply, ProjectOutputRecord, ProjectRecord, PublishRecord, PublishStatus, SiteKind,
+    SiteRecord, SiteStatus, SourceSnapshotRecord, Store, StoreError, Visibility,
 };
 use sha2::{Digest, Sha256};
 
@@ -40,6 +43,8 @@ pub enum EngineError {
     SiteNotFound,
     #[error("publish not found")]
     PublishNotFound,
+    #[error("project not found")]
+    ProjectNotFound,
     #[error("signer is not authorized for this site")]
     NotAuthorized,
     #[error("too many sites for this owner")]
@@ -50,6 +55,8 @@ pub enum EngineError {
     TooManyEditors,
     #[error("too many active keys for this email")]
     TooManyEmailKeys,
+    #[error("too many collaborators for this project")]
+    TooManyProjectCollaborators,
     #[error("validation failed: {0}")]
     Validation(&'static str),
     #[error("conflict: {0}")]
@@ -104,6 +111,7 @@ pub struct FinalizeOutcome {
     pub site_id: String,
     pub name: String,
     pub url: String,
+    pub version_id: String,
     pub version_number: u32,
     pub path_count: u32,
     pub total_bytes: u64,
@@ -159,6 +167,15 @@ pub struct LoginLink {
     pub url: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct GitCredentialAuth {
+    pub project_id: String,
+    pub project_slug: String,
+    pub principal_id: String,
+    pub git_credential_id: String,
+    pub can_push: bool,
+}
+
 pub struct Engine {
     store: Store,
     blobs: BlobStore,
@@ -192,6 +209,308 @@ impl Engine {
 
     pub fn store_mut(&mut self) -> &mut Store {
         &mut self.store
+    }
+
+    // ---- projects ----------------------------------------------------------
+
+    pub fn apply_project(
+        &mut self,
+        owner_pubkey: &str,
+        request: &ProjectApplyRequest,
+        git_remote_url: String,
+        now: u64,
+    ) -> Result<finitesites_proto::dto::ProjectApplyResponse, EngineError> {
+        assert!(hex::is_hex32(owner_pubkey));
+        request.config.validate()?;
+        if !self.store.has_publish_access(owner_pubkey, now)? {
+            return Err(EngineError::NotAllowlisted);
+        }
+        let finite_toml = request.config.to_toml_string()?;
+        let outputs = output_apply_inputs(request);
+        let collaborators = collaborator_apply_inputs(request)?;
+        if request.dry_run {
+            return self.dry_run_project_apply(
+                owner_pubkey,
+                request,
+                &outputs,
+                &collaborators,
+                git_remote_url,
+                finite_toml,
+            );
+        }
+
+        let outcome = self.store.apply_project(
+            owner_pubkey,
+            &request.config.project.slug,
+            &outputs,
+            &collaborators,
+            now,
+        )?;
+        Ok(self.project_apply_response_from_store(
+            request.dry_run,
+            git_remote_url,
+            finite_toml,
+            outcome,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dry_run_project_apply(
+        &self,
+        owner_pubkey: &str,
+        request: &ProjectApplyRequest,
+        outputs: &[ProjectOutputApply],
+        collaborators: &[ProjectCollaboratorApply],
+        git_remote_url: String,
+        finite_toml: String,
+    ) -> Result<finitesites_proto::dto::ProjectApplyResponse, EngineError> {
+        let existing_project = self.store.project_by_slug(&request.config.project.slug)?;
+        let project_id = existing_project.as_ref().map(|project| project.id.clone());
+        if let Some(project) = &existing_project {
+            let owner_principal = self
+                .store
+                .principal_by_pubkey(owner_pubkey)?
+                .ok_or(StoreError::CorruptState("project owner principal missing"))?;
+            if project.owner_principal_id != owner_principal.id {
+                return Err(EngineError::Conflict("project slug already exists"));
+            }
+        }
+        let existing_outputs = match &existing_project {
+            Some(project) => self.store.project_outputs(&project.id)?,
+            None => Vec::new(),
+        };
+
+        let mut output_summaries = Vec::with_capacity(outputs.len());
+        // Bounded by MAX_PROJECT_OUTPUTS, validated in Project Config.
+        for output in outputs {
+            let existing = existing_outputs
+                .iter()
+                .find(|record| record.output_id == output.output_id);
+            if let Some(record) = existing {
+                if record.kind != output.kind || record.site_name != output.site_name {
+                    return Err(EngineError::Conflict(
+                        "project output kind or site name cannot change",
+                    ));
+                }
+                output_summaries.push(project_output_summary(record, false, &self.config));
+                continue;
+            }
+            if self.store.site_by_name(&output.site_name)?.is_some() {
+                return Err(EngineError::NameTaken);
+            }
+            output_summaries.push(ProjectOutputSummary {
+                output_id: output.output_id.clone(),
+                kind: output.kind.clone(),
+                site_name: output.site_name.clone(),
+                site_id: None,
+                site_url: self.config.site_url(&output.site_name),
+                branch: output.branch.clone(),
+                path: output.path.clone(),
+                spa: output.spa,
+                created: true,
+            });
+        }
+
+        let mut collaborator_summaries = Vec::with_capacity(collaborators.len());
+        // Bounded by MAX_PROJECT_COLLABORATORS, checked in collaborator_apply_inputs.
+        for collaborator in collaborators {
+            let principal = self.store.principal_by_email(&collaborator.email)?;
+            collaborator_summaries.push(ProjectCollaboratorSummary {
+                principal_id: principal.map(|record| record.id),
+                email: collaborator.email.clone(),
+                role: collaborator.role.as_str().to_string(),
+                created: true,
+            });
+        }
+
+        Ok(finitesites_proto::dto::ProjectApplyResponse {
+            dry_run: true,
+            project_id,
+            slug: request.config.project.slug.clone(),
+            created: existing_project.is_none(),
+            git_remote_url,
+            finite_toml,
+            outputs: output_summaries,
+            collaborators: collaborator_summaries,
+        })
+    }
+
+    fn project_apply_response_from_store(
+        &self,
+        dry_run: bool,
+        git_remote_url: String,
+        finite_toml: String,
+        outcome: ProjectApplyStoreOutcome,
+    ) -> finitesites_proto::dto::ProjectApplyResponse {
+        let outputs = outcome
+            .outputs
+            .iter()
+            .map(|output| project_output_summary(&output.record, output.created, &self.config))
+            .collect();
+        let collaborators = outcome
+            .collaborators
+            .iter()
+            .map(|collaborator| ProjectCollaboratorSummary {
+                principal_id: Some(collaborator.record.principal_id.clone()),
+                email: collaborator
+                    .record
+                    .email
+                    .clone()
+                    .unwrap_or_else(|| String::from("")),
+                role: collaborator.record.role.as_str().to_string(),
+                created: collaborator.created,
+            })
+            .collect();
+        finitesites_proto::dto::ProjectApplyResponse {
+            dry_run,
+            project_id: Some(outcome.project.id),
+            slug: outcome.project.slug,
+            created: outcome.created,
+            git_remote_url,
+            finite_toml,
+            outputs,
+            collaborators,
+        }
+    }
+
+    pub fn mint_git_credential(
+        &mut self,
+        actor_pubkey: &str,
+        project_slug: &str,
+        actor_email: &str,
+        git_remote_url: String,
+        now: u64,
+    ) -> Result<GitAuthResponse, EngineError> {
+        assert!(hex::is_hex32(actor_pubkey));
+        let email = validate_email(actor_email)?;
+        let project = self
+            .store
+            .project_by_slug(project_slug)?
+            .ok_or(EngineError::ProjectNotFound)?;
+        if !self.store.has_email_key(&email, actor_pubkey)? {
+            return Err(EngineError::NotAuthorized);
+        }
+        let collaborator = self
+            .store
+            .active_project_collaborator_by_email(&project.id, &email)?
+            .ok_or(EngineError::NotAuthorized)?;
+        if collaborator.role == ProjectCollaboratorRole::Viewer {
+            return Err(EngineError::NotAuthorized);
+        }
+
+        let credential_id = ids::new_id(ids::GIT_CREDENTIAL_ID_PREFIX);
+        let password = hex::encode(&ids::random_32());
+        let token_hash = hex::encode(&Sha256::digest(password.as_bytes()));
+        self.store.create_git_credential(
+            &credential_id,
+            &project.id,
+            &collaborator.principal_id,
+            &token_hash,
+            None,
+            now,
+        )?;
+        Ok(GitAuthResponse {
+            project_slug: project.slug,
+            git_remote_url,
+            credential_id: credential_id.clone(),
+            username: credential_id,
+            password,
+            expires_at: None,
+        })
+    }
+
+    pub fn authenticate_git_credential(
+        &self,
+        username: &str,
+        password: &str,
+        project_slug: &str,
+        now: u64,
+    ) -> Result<GitCredentialAuth, EngineError> {
+        let credential = self
+            .store
+            .git_credential_by_id(username)?
+            .ok_or(EngineError::NotAuthorized)?;
+        let token_hash = hex::encode(&Sha256::digest(password.as_bytes()));
+        if credential.token_hash != token_hash {
+            return Err(EngineError::NotAuthorized);
+        }
+        if credential.revoked_at.is_some() {
+            return Err(EngineError::NotAuthorized);
+        }
+        if let Some(expires_at) = credential.expires_at
+            && now >= expires_at
+        {
+            return Err(EngineError::NotAuthorized);
+        }
+        let project =
+            self.store
+                .project_by_id(&credential.project_id)?
+                .ok_or(StoreError::CorruptState(
+                    "git credential references missing project",
+                ))?;
+        if project.slug != project_slug {
+            return Err(EngineError::NotAuthorized);
+        }
+        let collaborator = self
+            .store
+            .active_project_collaborator_by_principal(&project.id, &credential.principal_id)?
+            .ok_or(EngineError::NotAuthorized)?;
+        Ok(GitCredentialAuth {
+            project_id: project.id,
+            project_slug: project.slug,
+            principal_id: collaborator.principal_id,
+            git_credential_id: credential.id,
+            can_push: collaborator.role != ProjectCollaboratorRole::Viewer,
+        })
+    }
+
+    pub fn record_git_ref_event(
+        &mut self,
+        auth: &GitCredentialAuth,
+        ref_name: &str,
+        old_sha: &str,
+        new_sha: &str,
+        now: u64,
+    ) -> Result<(GitRefEventRecord, bool), EngineError> {
+        Ok(self.store.record_git_ref_event(
+            &auth.project_id,
+            ref_name,
+            old_sha,
+            new_sha,
+            &auth.principal_id,
+            None,
+            &auth.git_credential_id,
+            now,
+        )?)
+    }
+
+    pub fn mark_git_ref_event_deployed(
+        &mut self,
+        event_id: i64,
+        project_output_id: &str,
+        version_id: &str,
+        now: u64,
+    ) -> Result<(), EngineError> {
+        Ok(self
+            .store
+            .mark_git_ref_event_deployed(event_id, project_output_id, version_id, now)?)
+    }
+
+    pub fn mark_git_ref_event_ignored(
+        &mut self,
+        event_id: i64,
+        now: u64,
+    ) -> Result<(), EngineError> {
+        Ok(self.store.mark_git_ref_event_ignored(event_id, now)?)
+    }
+
+    pub fn mark_git_ref_event_failed(
+        &mut self,
+        event_id: i64,
+        error: &str,
+        now: u64,
+    ) -> Result<(), EngineError> {
+        Ok(self.store.mark_git_ref_event_failed(event_id, error, now)?)
     }
 
     // ---- claims ------------------------------------------------------------
@@ -600,6 +919,83 @@ impl Engine {
         )
     }
 
+    pub fn commit_project_output_version(
+        &mut self,
+        site_id: &str,
+        files: Vec<(ManifestFile, Vec<u8>)>,
+        spa_fallback: bool,
+        now: u64,
+    ) -> Result<FinalizeOutcome, EngineError> {
+        let site = self
+            .store
+            .site_by_id(site_id)?
+            .ok_or(EngineError::SiteNotFound)?;
+        if site.status == SiteStatus::Disabled || site.status == SiteStatus::Deleted {
+            return Err(EngineError::Conflict("site is disabled"));
+        }
+        if site.kind == SiteKind::App {
+            return Err(EngineError::Conflict("project output site is an app"));
+        }
+        let manifest = PublishManifest {
+            files: files.iter().map(|(file, _)| file.clone()).collect(),
+        };
+        manifest.validate()?;
+        if spa_fallback {
+            let has_index = manifest.files.iter().any(|file| file.path == "/index.html");
+            if !has_index {
+                return Err(EngineError::Validation(
+                    "spa manifests must include /index.html",
+                ));
+            }
+        }
+
+        let publish_id = ids::new_id(ids::PUBLISH_ID_PREFIX);
+        self.store.create_publish_with_actor(
+            &publish_id,
+            &site.id,
+            &manifest.files,
+            spa_fallback,
+            None,
+            None,
+            None,
+            None,
+            now,
+        )?;
+        // Bounded by MAX_MANIFEST_FILES, validated above.
+        for (file, bytes) in &files {
+            if bytes.len() as u64 != file.size {
+                return Err(EngineError::Validation("blob size does not match manifest"));
+            }
+            let actual = hex::encode(&Sha256::digest(bytes));
+            if actual != file.sha256 {
+                return Err(EngineError::Validation("blob hash does not match manifest"));
+            }
+            self.blobs.put(&file.sha256, bytes, MAX_FILE_BYTES)?;
+            self.store.record_blob(&file.sha256, file.size, now)?;
+        }
+        let manifest_sha256 = manifest.digest();
+        let version_id = ids::new_id(ids::VERSION_ID_PREFIX);
+        let finalized =
+            match self
+                .store
+                .finalize_publish(&publish_id, &version_id, &manifest_sha256, now)
+            {
+                Ok(finalized) => finalized,
+                Err(StoreError::Conflict("publish has missing blobs")) => {
+                    return Err(EngineError::Conflict("publish has missing blobs"));
+                }
+                Err(other) => return Err(other.into()),
+            };
+        self.finalize_outcome(
+            &site.site_pubkey,
+            &version_id,
+            finalized.version_number,
+            finalized.path_count,
+            finalized.total_bytes,
+            finalized.source,
+        )
+    }
+
     /// Build the outcome from committed state. Re-reads the site so app
     /// fields (kind, port) reflect what finalize just wrote.
     fn finalize_outcome(
@@ -641,6 +1037,7 @@ impl Engine {
             site_id: site.id.clone(),
             name: site.name.clone(),
             url: self.config.site_url(&site.name),
+            version_id: version_id.to_string(),
             version_number,
             path_count,
             total_bytes,
@@ -1085,10 +1482,27 @@ impl Engine {
         if self.lookup_exact_file(site, "/llms.txt")?.is_some() {
             return Ok(false);
         }
+        if self.store.project_output_by_site_id(&site.id)?.is_some() {
+            return Ok(true);
+        }
         if self.store.editors(&site.id)?.is_empty() {
             return Ok(false);
         }
         Ok(self.site_source_info(site)?.is_some())
+    }
+
+    pub fn project_output_for_site(
+        &self,
+        site: &SiteRecord,
+    ) -> Result<Option<(ProjectRecord, ProjectOutputRecord)>, EngineError> {
+        Ok(self.store.project_output_by_site_id(&site.id)?)
+    }
+
+    pub fn project_outputs(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ProjectOutputRecord>, EngineError> {
+        Ok(self.store.project_outputs(project_id)?)
     }
 
     /// The site's custom 404 page, if it published one.
@@ -1430,6 +1844,69 @@ fn validate_source_snapshot(
         sha256: source.sha256.clone(),
         size: source.size,
     })
+}
+
+fn output_apply_inputs(request: &ProjectApplyRequest) -> Vec<ProjectOutputApply> {
+    let mut outputs = Vec::with_capacity(request.config.outputs.len());
+    // Bounded by ProjectConfig::validate.
+    for (output_id, output) in &request.config.outputs {
+        outputs.push(ProjectOutputApply {
+            output_id: output_id.clone(),
+            kind: output.kind.as_str().to_string(),
+            site_name: output.site_name.clone(),
+            branch: output.branch.clone(),
+            path: output.path.clone(),
+            spa: output.spa,
+        });
+    }
+    outputs
+}
+
+fn collaborator_apply_inputs(
+    request: &ProjectApplyRequest,
+) -> Result<Vec<ProjectCollaboratorApply>, EngineError> {
+    if request.collaborators.len() > MAX_PROJECT_COLLABORATORS as usize {
+        return Err(EngineError::TooManyProjectCollaborators);
+    }
+    let mut collaborators = Vec::with_capacity(request.collaborators.len());
+    // Bounded by MAX_PROJECT_COLLABORATORS above.
+    for collaborator in &request.collaborators {
+        let email = validate_email(&collaborator.email)?;
+        let role = match ProjectCollaboratorRole::parse(&collaborator.role) {
+            Ok(ProjectCollaboratorRole::Owner) => {
+                return Err(EngineError::Validation(
+                    "owner role is assigned by project ownership",
+                ));
+            }
+            Ok(role) => role,
+            Err(StoreError::Conflict(_)) => {
+                return Err(EngineError::Validation(
+                    "project collaborator role must be editor or viewer",
+                ));
+            }
+            Err(error) => return Err(EngineError::Store(error)),
+        };
+        collaborators.push(ProjectCollaboratorApply { email, role });
+    }
+    Ok(collaborators)
+}
+
+fn project_output_summary(
+    record: &ProjectOutputRecord,
+    created: bool,
+    config: &EngineConfig,
+) -> ProjectOutputSummary {
+    ProjectOutputSummary {
+        output_id: record.output_id.clone(),
+        kind: record.kind.clone(),
+        site_name: record.site_name.clone(),
+        site_id: Some(record.site_id.clone()),
+        site_url: config.site_url(&record.site_name),
+        branch: record.branch.clone(),
+        path: record.path.clone(),
+        spa: record.spa,
+        created,
+    }
 }
 
 #[cfg(test)]

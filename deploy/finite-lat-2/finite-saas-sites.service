@@ -23,6 +23,7 @@ ExecStart=/usr/local/bin/finitesitesd serve \
   --listen 127.0.0.1:8787 \
   --base-domain finite.chat \
   --api-url https://api.finite.chat \
+  --git-url https://git.finite.chat \
   --site-scheme https \
   --site-port none \
   --mailer resend \

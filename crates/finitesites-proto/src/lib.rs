@@ -14,6 +14,7 @@ pub mod manifest;
 pub mod names;
 pub mod nip98;
 pub mod npub;
+pub mod project_config;
 
 pub use event::NostrEvent;
 pub use manifest::{ManifestFile, PublishManifest};
@@ -42,4 +43,6 @@ pub enum ProtoError {
     InvalidSiteName(&'static str),
     #[error("invalid manifest: {0}")]
     InvalidManifest(&'static str),
+    #[error("invalid project config: {0}")]
+    InvalidProjectConfig(&'static str),
 }

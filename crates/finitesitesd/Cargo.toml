@@ -1,6 +1,6 @@
 [package]
 name = "finitesitesd"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,6 +13,8 @@ finitesites-store = { path = "../finitesites-store" }
 finitesites-engine = { path = "../finitesites-engine" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 axum = { workspace = true }
@@ -27,4 +29,3 @@ http-body-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-sha2 = { workspace = true }

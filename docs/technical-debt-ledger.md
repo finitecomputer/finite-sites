@@ -123,3 +123,22 @@ snapshot suspend deferred (stop/start already gets idle RAM to ~0).
   deploy (run the start command once before flipping live) before tier 2
   is announced; (c) a fixed in-guest uid mapping or a root-owned cleanup
   helper when app deletion ships.
+
+## 12. Git ref events are captured by the receive-pack wrapper, not a hook
+
+- **Source**: first Project Repository implementation. `finitesitesd`
+  authenticates Git smart HTTP, snapshots refs before and after
+  `git-http-backend`, records changed refs, and reconciles Deploy Branches
+  inline after receive-pack returns.
+- **Risk**: a daemon crash after Git updates refs but before the wrapper
+  records the durable ref event can leave a pushed commit undeployed until
+  another push changes the ref. This is the fragile part ADR-0019 wanted to
+  avoid with post-receive plus startup reconciliation.
+- **Proof**: `crates/finitesitesd/src/git.rs` `reconcile_receive_pack`
+  compares refs after `git http-backend`; no installed `hooks/post-receive`
+  writes registry events yet.
+- **Delete condition**: install a `post-receive` hook for every Project
+  Repository that durably records ref-change events before the Git client
+  sees success; add restart reconciliation that drains pending events and
+  tests crash after ref update before deploy, crash after Version creation
+  before event acknowledgement, and idempotent replay.

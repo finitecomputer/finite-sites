@@ -1,9 +1,17 @@
 use sha2::{Digest, Sha256};
 
 use finitesites_blob::BlobStore;
-use finitesites_proto::dto::{EditorsRequest, SharingRequest, SourceSnapshotRequest};
+use std::collections::BTreeMap;
+
+use finitesites_proto::dto::{
+    EditorsRequest, ProjectApplyRequest, ProjectCollaboratorSpec, SharingRequest,
+    SourceSnapshotRequest,
+};
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE, MAX_SITES_PER_OWNER,
+};
+use finitesites_proto::project_config::{
+    ProjectConfig, ProjectOutputConfig, ProjectOutputKind, ProjectSection,
 };
 use finitesites_proto::{ManifestFile, PublishManifest, hex};
 use finitesites_store::{PublishGrantSource, SiteStatus, Store, Visibility};
@@ -55,6 +63,33 @@ fn manifest_for(entries: &[(&str, &[u8])]) -> PublishManifest {
                 size: bytes.len() as u64,
             })
             .collect(),
+    }
+}
+
+fn project_request(dry_run: bool) -> ProjectApplyRequest {
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "mockup".to_string(),
+        ProjectOutputConfig {
+            kind: ProjectOutputKind::Site,
+            site_name: "finitechat-native-mockup".to_string(),
+            branch: "main".to_string(),
+            path: ".".to_string(),
+            spa: false,
+        },
+    );
+    ProjectApplyRequest {
+        config: ProjectConfig {
+            project: ProjectSection {
+                slug: "finitechat-native".to_string(),
+            },
+            outputs,
+        },
+        dry_run,
+        collaborators: vec![ProjectCollaboratorSpec {
+            email: "skyler@example.com".to_string(),
+            role: "editor".to_string(),
+        }],
     }
 }
 
@@ -145,6 +180,124 @@ fn claim_enforces_per_owner_limit() {
         .engine
         .claim(OWNER, "one-too-many", &format!("{:064x}", 0x9000), NOW);
     assert!(matches!(over, Err(EngineError::TooManySites)));
+}
+
+// ---- projects -------------------------------------------------------------
+
+#[test]
+fn project_apply_dry_run_create_and_replay() {
+    let mut fx = fixture();
+    let dry_run = fx
+        .engine
+        .apply_project(
+            OWNER,
+            &project_request(true),
+            "https://git.finite.chat/finitechat-native.git".to_string(),
+            NOW,
+        )
+        .unwrap();
+    assert!(dry_run.dry_run);
+    assert!(dry_run.created);
+    assert_eq!(dry_run.project_id, None);
+    assert_eq!(dry_run.outputs[0].site_id, None);
+    assert!(
+        fx.engine
+            .resolve_site("finitechat-native-mockup")
+            .unwrap()
+            .is_none()
+    );
+
+    let created = fx
+        .engine
+        .apply_project(
+            OWNER,
+            &project_request(false),
+            "https://git.finite.chat/finitechat-native.git".to_string(),
+            NOW + 1,
+        )
+        .unwrap();
+    assert!(!created.dry_run);
+    assert!(created.created);
+    assert!(created.project_id.is_some());
+    assert!(created.outputs[0].created);
+    assert_eq!(created.collaborators[0].email, "skyler@example.com");
+    assert!(
+        fx.engine
+            .resolve_site("finitechat-native-mockup")
+            .unwrap()
+            .is_some()
+    );
+
+    let replay = fx
+        .engine
+        .apply_project(
+            OWNER,
+            &project_request(false),
+            "https://git.finite.chat/finitechat-native.git".to_string(),
+            NOW + 2,
+        )
+        .unwrap();
+    assert!(!replay.created);
+    assert!(!replay.outputs[0].created);
+    assert_eq!(replay.project_id, created.project_id);
+}
+
+#[test]
+fn project_apply_rejects_role_that_does_not_belong_to_collaborators() {
+    let mut fx = fixture();
+    let mut request = project_request(false);
+    request.collaborators[0].role = "owner".to_string();
+    let result = fx.engine.apply_project(
+        OWNER,
+        &request,
+        "https://git.finite.chat/finitechat-native.git".to_string(),
+        NOW,
+    );
+    assert!(matches!(result, Err(EngineError::Validation(_))));
+}
+
+#[test]
+fn git_credential_requires_verified_project_collaborator() {
+    let mut fx = fixture();
+    fx.engine
+        .apply_project(
+            OWNER,
+            &project_request(false),
+            "https://git.finite.chat/finitechat-native.git".to_string(),
+            NOW,
+        )
+        .unwrap();
+
+    let unverified = fx.engine.mint_git_credential(
+        OTHER_OWNER,
+        "finitechat-native",
+        "skyler@example.com",
+        "https://git.finite.chat/finitechat-native.git".to_string(),
+        NOW + 1,
+    );
+    assert!(matches!(unverified, Err(EngineError::NotAuthorized)));
+
+    verify_email_key(&mut fx.engine, "skyler@example.com", OTHER_OWNER);
+    let credential = fx
+        .engine
+        .mint_git_credential(
+            OTHER_OWNER,
+            "finitechat-native",
+            "skyler@example.com",
+            "https://git.finite.chat/finitechat-native.git".to_string(),
+            NOW + 2,
+        )
+        .unwrap();
+    assert_eq!(credential.project_slug, "finitechat-native");
+    assert_eq!(credential.username, credential.credential_id);
+    assert_eq!(credential.password.len(), 64);
+    assert!(
+        fx.engine
+            .store_mut()
+            .git_credential_by_id(&credential.credential_id)
+            .unwrap()
+            .is_some()
+    );
 }
 
 // ---- publish ----------------------------------------------------------------

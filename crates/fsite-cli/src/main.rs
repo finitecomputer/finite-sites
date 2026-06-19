@@ -19,14 +19,18 @@ mod keys;
 mod source;
 mod walk;
 
-use std::path::PathBuf;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use sha2::Digest as _;
 use thiserror::Error;
 
-use finitesites_proto::dto::{EditorsRequest, SharingRequest, SourceSnapshotRequest};
+use finitesites_proto::dto::{
+    EditorsRequest, GitAuthRequest, ProjectApplyRequest, SharingRequest, SourceSnapshotRequest,
+};
 use finitesites_proto::limits::MAX_EMAILS_PER_SHARING_REQUEST;
+use finitesites_proto::project_config::parse_project_config_toml;
 use finitesites_proto::{hex, npub};
 
 #[derive(Debug, Error)]
@@ -62,6 +66,9 @@ fn run(args: &[String]) -> Result<(), CliError> {
         "whoami" => whoami(),
         "email-login" => email_login(&args[1..]),
         "email-redeem" => email_redeem(&args[1..]),
+        "describe" => describe(&args[1..]),
+        "project" => project_command(&args[1..]),
+        "auth" => auth_command(&args[1..]),
         "claim" => claim(&args[1..]),
         "publish" => publish(&args[1..]),
         "publish-app" => publish_app(&args[1..]),
@@ -84,6 +91,9 @@ fn run(args: &[String]) -> Result<(), CliError> {
 fn usage() -> String {
     "usage:\n  fsite whoami\n  fsite email-login EMAIL\n  \
      fsite email-redeem EMAIL TOKEN\n  fsite claim NAME [--owner-email EMAIL]\n  \
+     fsite describe [workflow NAME] [--output json]\n  \
+     fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n  \
+     fsite auth git PROJECT --email EMAIL [--output json]\n  \
      fsite publish NAME PATH [--spa] [--source PATH] [--owner-email EMAIL] [--email EMAIL]\n  \
      fsite publish-app NAME PATH --start \"CMD\"\n  \
      fsite status NAME\n  fsite list\n  fsite share NAME [--shared|--private] \
@@ -91,6 +101,364 @@ fn usage() -> String {
      fsite editors NAME [--email OWNER_EMAIL] [--add-email EMAIL]... [--remove-email EMAIL]...\n  \
      fsite source pull NAME PATH [--email EMAIL]"
         .to_string()
+}
+
+fn describe(args: &[String]) -> Result<(), CliError> {
+    let mut positionals: Vec<&String> = Vec::new();
+    let mut output_json = false;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--output" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
+                }
+                output_json = true;
+                index += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            _ => {
+                positionals.push(&args[index]);
+                index += 1;
+            }
+        }
+    }
+
+    let value = match positionals.as_slice() {
+        [] => describe_commands(),
+        [workflow, name] if workflow.as_str() == "workflow" => describe_workflow(name)?,
+        _ => {
+            return Err(CliError::Usage(
+                "usage: fsite describe [workflow NAME] [--output json]".to_string(),
+            ));
+        }
+    };
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).expect("describe json serializes")
+        );
+    } else {
+        println!("machine-readable description (use --output json in agent workflows):");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).expect("describe json serializes")
+        );
+    }
+    Ok(())
+}
+
+fn describe_commands() -> serde_json::Value {
+    serde_json::json!({
+        "commands": [
+            {
+                "name": "project apply",
+                "summary": "Create or update a Project Repository and finite.toml-described outputs.",
+                "usage": "fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]"
+            },
+            {
+                "name": "auth git",
+                "summary": "Mint a scoped HTTPS Git Credential after email verification.",
+                "usage": "fsite auth git PROJECT --email EMAIL [--output json]"
+            },
+            {
+                "name": "describe workflow",
+                "summary": "Print machine-readable workflow guidance.",
+                "usage": "fsite describe workflow NAME --output json"
+            },
+            {
+                "name": "publish",
+                "summary": "Legacy site-first publish with optional source snapshot.",
+                "usage": "fsite publish NAME PATH [--spa] [--source PATH] [--email EMAIL]"
+            }
+        ],
+        "workflows": [
+            "project-config",
+            "initial-project-publish",
+            "edit-shared-project",
+            "grant-collaborator"
+        ]
+    })
+}
+
+fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
+    let value = match name {
+        "project-config" => serde_json::json!({
+            "name": "project-config",
+            "file": "finite.toml",
+            "schema": {
+                "project.slug": "lowercase DNS-label-shaped Project Slug",
+                "outputs.<id>.kind": "site",
+                "outputs.<id>.site_name": "Finite Site name for this Project Output",
+                "outputs.<id>.branch": "Deploy Branch, usually main",
+                "outputs.<id>.path": "relative directory containing committed deploy bytes",
+                "outputs.<id>.spa": "boolean; true serves /index.html for unknown static paths"
+            },
+            "example": "[project]\nslug = \"finitechat-native\"\n\n[outputs.mockup]\nkind = \"site\"\nsite_name = \"finitechat-native-mockup\"\nbranch = \"main\"\npath = \".\"\nspa = false\n"
+        }),
+        "initial-project-publish" => serde_json::json!({
+            "name": "initial-project-publish",
+            "steps": [
+                "Create or build committed deploy bytes in the path selected by finite.toml.",
+                "Run fsite project apply --json project.json --dry-run --output json.",
+                "Run fsite project apply --json project.json --output json.",
+                "Commit finite.toml and deploy bytes to the Project Repository.",
+                "Push the Deploy Branch; Finite Sites validates committed bytes and creates a Version."
+            ]
+        }),
+        "edit-shared-project" => serde_json::json!({
+            "name": "edit-shared-project",
+            "steps": [
+                "Run fsite email-login EDITOR_EMAIL if this machine is not verified.",
+                "Run fsite email-redeem EDITOR_EMAIL TOKEN_FROM_EMAIL.",
+                "Run fsite auth git PROJECT --email EDITOR_EMAIL --output json.",
+                "Use the returned git_remote_url, username, and password with standard git.",
+                "Clone, edit source, run the project's tests/build, commit deploy bytes, and push the Deploy Branch."
+            ]
+        }),
+        "grant-collaborator" => serde_json::json!({
+            "name": "grant-collaborator",
+            "steps": [
+                "Add the collaborator email to the collaborators array in the project apply JSON.",
+                "Use role editor for agents that may push deploy bytes.",
+                "Run fsite project apply --json project.json --dry-run --output json.",
+                "Run fsite project apply --json project.json --output json after confirming the plan."
+            ]
+        }),
+        other => {
+            return Err(CliError::Usage(format!(
+                "unknown workflow `{other}` (project-config|initial-project-publish|edit-shared-project|grant-collaborator)"
+            )));
+        }
+    };
+    Ok(value)
+}
+
+fn project_command(args: &[String]) -> Result<(), CliError> {
+    let Some((subcommand, rest)) = args.split_first() else {
+        return Err(CliError::Usage(
+            "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]"
+                .to_string(),
+        ));
+    };
+    match subcommand.as_str() {
+        "apply" => project_apply(rest),
+        other => Err(CliError::Usage(format!(
+            "unknown project command `{other}`"
+        ))),
+    }
+}
+
+fn project_apply(args: &[String]) -> Result<(), CliError> {
+    let mut json_path: Option<String> = None;
+    let mut dry_run = false;
+    let mut output_json = false;
+    let mut config_path = PathBuf::from("finite.toml");
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--json needs FILE or -".to_string()))?;
+                json_path = Some(value.clone());
+                index += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
+            "--output" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
+                }
+                output_json = true;
+                index += 2;
+            }
+            "--config" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--config needs a path".to_string()))?;
+                config_path = PathBuf::from(value);
+                index += 2;
+            }
+            other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
+        }
+    }
+    let json_path = json_path.ok_or_else(|| {
+        CliError::Usage(
+            "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]"
+                .to_string(),
+        )
+    })?;
+    let mut request: ProjectApplyRequest = serde_json::from_slice(&read_json_input(&json_path)?)
+        .map_err(|error| CliError::Usage(format!("invalid project apply json: {error}")))?;
+    if dry_run {
+        request.dry_run = true;
+    }
+    request
+        .config
+        .validate()
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    validate_project_config_file(&config_path, &request)?;
+
+    let identity = keys::load_or_create_identity()?;
+    let client = api::Client::from_env();
+    let response = client.apply_project(&identity, &request)?;
+    if !response.dry_run {
+        write_project_config_file_if_missing(&config_path, &request)?;
+    }
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("response serializes")
+        );
+    } else {
+        println!("project: {}", response.slug);
+        println!("git:     {}", response.git_remote_url);
+        for output in &response.outputs {
+            println!(
+                "output:  {} {} -> {} ({})",
+                output.output_id, output.kind, output.site_url, output.path
+            );
+        }
+        if response.dry_run {
+            println!("dry-run: no server state changed and finite.toml was not written");
+        }
+    }
+    Ok(())
+}
+
+fn read_json_input(path: &str) -> Result<Vec<u8>, CliError> {
+    if path == "-" {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut bytes)
+            .map_err(|error| CliError::Io(format!("cannot read stdin: {error}")))?;
+        return Ok(bytes);
+    }
+    std::fs::read(path).map_err(|error| CliError::Io(format!("cannot read {path}: {error}")))
+}
+
+fn validate_project_config_file(
+    path: &Path,
+    request: &ProjectApplyRequest,
+) -> Result<(), CliError> {
+    if path.exists() {
+        let existing = std::fs::read_to_string(path)
+            .map_err(|error| CliError::Io(format!("cannot read {}: {error}", path.display())))?;
+        let parsed = parse_project_config_toml(&existing)
+            .map_err(|error| CliError::Usage(format!("{} is invalid: {error}", path.display())))?;
+        if parsed != request.config {
+            return Err(CliError::Usage(format!(
+                "{} already exists and does not match --json config",
+                path.display()
+            )));
+        }
+        return Ok(());
+    }
+    Ok(())
+}
+
+fn write_project_config_file_if_missing(
+    path: &Path,
+    request: &ProjectApplyRequest,
+) -> Result<(), CliError> {
+    if path.exists() {
+        return Ok(());
+    }
+    let expected = request
+        .config
+        .to_toml_string()
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    std::fs::write(path, expected)
+        .map_err(|error| CliError::Io(format!("cannot write {}: {error}", path.display())))?;
+    Ok(())
+}
+
+fn auth_command(args: &[String]) -> Result<(), CliError> {
+    let Some((subcommand, rest)) = args.split_first() else {
+        return Err(CliError::Usage(
+            "usage: fsite auth git PROJECT --email EMAIL [--output json]".to_string(),
+        ));
+    };
+    match subcommand.as_str() {
+        "git" => auth_git(rest),
+        other => Err(CliError::Usage(format!("unknown auth command `{other}`"))),
+    }
+}
+
+fn auth_git(args: &[String]) -> Result<(), CliError> {
+    let mut positionals: Vec<&String> = Vec::new();
+    let mut email: Option<String> = None;
+    let mut output_json = false;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--email" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
+                email = Some(value.clone());
+                index += 2;
+            }
+            "--output" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
+                }
+                output_json = true;
+                index += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            _ => {
+                positionals.push(&args[index]);
+                index += 1;
+            }
+        }
+    }
+    let [project] = positionals.as_slice() else {
+        return Err(CliError::Usage(
+            "usage: fsite auth git PROJECT --email EMAIL [--output json]".to_string(),
+        ));
+    };
+    let email = email.ok_or_else(|| CliError::Usage("--email is required".to_string()))?;
+    let key = keys::load_or_create_email_key(&email)?;
+    let client = api::Client::from_env();
+    let response = client.auth_git(&key, project, &GitAuthRequest { email })?;
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("response serializes")
+        );
+    } else {
+        println!("git:      {}", response.git_remote_url);
+        println!("username: {}", response.username);
+        println!("password: {}", response.password);
+        println!("use this credential with standard git HTTPS for this project only");
+    }
+    Ok(())
 }
 
 fn whoami() -> Result<(), CliError> {

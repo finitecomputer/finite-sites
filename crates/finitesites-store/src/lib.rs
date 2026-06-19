@@ -12,7 +12,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
-use finitesites_proto::ManifestFile;
+use finitesites_proto::{ManifestFile, hex, ids};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -212,6 +212,195 @@ pub struct PublishGrant {
     pub expires_at: Option<u64>,
     pub granted_at: u64,
     pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrincipalKind {
+    Native,
+    External,
+}
+
+impl PrincipalKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PrincipalKind::Native => "native",
+            PrincipalKind::External => "external",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<PrincipalKind, StoreError> {
+        match value {
+            "native" => Ok(PrincipalKind::Native),
+            "external" => Ok(PrincipalKind::External),
+            _ => Err(StoreError::CorruptState("unknown principal kind in db")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrincipalRecord {
+    pub id: String,
+    pub kind: PrincipalKind,
+    pub email: Option<String>,
+    pub pubkey: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectCollaboratorRole {
+    Owner,
+    Editor,
+    Viewer,
+}
+
+impl ProjectCollaboratorRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProjectCollaboratorRole::Owner => "owner",
+            ProjectCollaboratorRole::Editor => "editor",
+            ProjectCollaboratorRole::Viewer => "viewer",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<ProjectCollaboratorRole, StoreError> {
+        match value {
+            "owner" => Ok(ProjectCollaboratorRole::Owner),
+            "editor" => Ok(ProjectCollaboratorRole::Editor),
+            "viewer" => Ok(ProjectCollaboratorRole::Viewer),
+            _ => Err(StoreError::Conflict("unknown project collaborator role")),
+        }
+    }
+
+    fn from_db(value: &str) -> Result<ProjectCollaboratorRole, StoreError> {
+        match value {
+            "owner" => Ok(ProjectCollaboratorRole::Owner),
+            "editor" => Ok(ProjectCollaboratorRole::Editor),
+            "viewer" => Ok(ProjectCollaboratorRole::Viewer),
+            _ => Err(StoreError::CorruptState(
+                "unknown project collaborator role in db",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRecord {
+    pub id: String,
+    pub slug: String,
+    pub owner_principal_id: String,
+    pub visibility: Visibility,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectOutputRecord {
+    pub id: String,
+    pub project_id: String,
+    pub output_id: String,
+    pub kind: String,
+    pub site_id: String,
+    pub site_name: String,
+    pub branch: String,
+    pub path: String,
+    pub spa: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectCollaboratorRecord {
+    pub project_id: String,
+    pub principal_id: String,
+    pub role: ProjectCollaboratorRole,
+    pub email: Option<String>,
+    pub pubkey: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectOutputApply {
+    pub output_id: String,
+    pub kind: String,
+    pub site_name: String,
+    pub branch: String,
+    pub path: String,
+    pub spa: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectCollaboratorApply {
+    pub email: String,
+    pub role: ProjectCollaboratorRole,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedProjectOutput {
+    pub record: ProjectOutputRecord,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedProjectCollaborator {
+    pub record: ProjectCollaboratorRecord,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectApplyStoreOutcome {
+    pub project: ProjectRecord,
+    pub created: bool,
+    pub outputs: Vec<AppliedProjectOutput>,
+    pub collaborators: Vec<AppliedProjectCollaborator>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCredentialRecord {
+    pub id: String,
+    pub project_id: String,
+    pub principal_id: String,
+    pub token_hash: String,
+    pub expires_at: Option<u64>,
+    pub revoked_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitRefEventStatus {
+    Pending,
+    Deployed,
+    Ignored,
+    Failed,
+}
+
+impl GitRefEventStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GitRefEventStatus::Pending => "pending",
+            GitRefEventStatus::Deployed => "deployed",
+            GitRefEventStatus::Ignored => "ignored",
+            GitRefEventStatus::Failed => "failed",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<GitRefEventStatus, StoreError> {
+        match value {
+            "pending" => Ok(GitRefEventStatus::Pending),
+            "deployed" => Ok(GitRefEventStatus::Deployed),
+            "ignored" => Ok(GitRefEventStatus::Ignored),
+            "failed" => Ok(GitRefEventStatus::Failed),
+            _ => Err(StoreError::CorruptState("unknown git ref event status")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRefEventRecord {
+    pub id: i64,
+    pub project_id: String,
+    pub ref_name: String,
+    pub old_sha: String,
+    pub new_sha: String,
+    pub actor_principal_id: String,
+    pub actor_agent_key_id: Option<String>,
+    pub git_credential_id: String,
+    pub project_output_id: Option<String>,
+    pub status: GitRefEventStatus,
+    pub version_id: Option<String>,
+    pub error: Option<String>,
 }
 
 const SITE_SELECT: &str = "
@@ -452,6 +641,615 @@ impl Store {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    // ---- principals and projects -----------------------------------------
+
+    pub fn principal_by_email(&self, email: &str) -> Result<Option<PrincipalRecord>, StoreError> {
+        self.principal_query("WHERE email = ?1", email)
+    }
+
+    pub fn principal_by_pubkey(&self, pubkey: &str) -> Result<Option<PrincipalRecord>, StoreError> {
+        self.principal_query("WHERE pubkey = ?1", pubkey)
+    }
+
+    fn principal_query(
+        &self,
+        where_clause: &str,
+        value: &str,
+    ) -> Result<Option<PrincipalRecord>, StoreError> {
+        let sql = format!("SELECT id, kind, email, pubkey FROM principals {where_clause}");
+        let row = self
+            .conn
+            .query_row(&sql, params![value], Self::row_to_principal)
+            .optional()?;
+        match row {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+
+    fn row_to_principal(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<PrincipalRecord, StoreError>> {
+        let kind_raw: String = row.get(1)?;
+        Ok(Ok(PrincipalRecord {
+            id: row.get(0)?,
+            kind: PrincipalKind::from_db(&kind_raw).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    1,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            email: row.get(2)?,
+            pubkey: row.get(3)?,
+        }))
+    }
+
+    pub fn project_by_slug(&self, slug: &str) -> Result<Option<ProjectRecord>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, slug, owner_principal_id, visibility
+                 FROM projects WHERE slug = ?1",
+                params![slug],
+                Self::row_to_project,
+            )
+            .optional()?;
+        match row {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn project_by_id(&self, project_id: &str) -> Result<Option<ProjectRecord>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, slug, owner_principal_id, visibility
+                 FROM projects WHERE id = ?1",
+                params![project_id],
+                Self::row_to_project,
+            )
+            .optional()?;
+        match row {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn project_outputs(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ProjectOutputRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, project_id, output_id, kind, site_id, site_name, branch, output_path, spa_fallback
+             FROM project_outputs
+             WHERE project_id = ?1
+             ORDER BY output_id",
+        )?;
+        let rows = stmt.query_map(params![project_id], Self::row_to_project_output)?;
+        let mut out = Vec::new();
+        // Bounded by MAX_PROJECT_OUTPUTS, enforced by Project Config.
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    pub fn project_output_by_site_id(
+        &self,
+        site_id: &str,
+    ) -> Result<Option<(ProjectRecord, ProjectOutputRecord)>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT p.id, p.slug, p.owner_principal_id, p.visibility,
+                        po.id, po.project_id, po.output_id, po.kind, po.site_id,
+                        po.site_name, po.branch, po.output_path, po.spa_fallback
+                 FROM project_outputs po
+                 JOIN projects p ON p.id = po.project_id
+                 WHERE po.site_id = ?1",
+                params![site_id],
+                |row| {
+                    let project_visibility_raw: String = row.get(3)?;
+                    let spa_raw: i64 = row.get(12)?;
+                    Ok::<Result<(ProjectRecord, ProjectOutputRecord), StoreError>, rusqlite::Error>(
+                        Ok((
+                            ProjectRecord {
+                                id: row.get(0)?,
+                                slug: row.get(1)?,
+                                owner_principal_id: row.get(2)?,
+                                visibility: Visibility::from_db(&project_visibility_raw).map_err(
+                                    |error| {
+                                        rusqlite::Error::FromSqlConversionFailure(
+                                            3,
+                                            rusqlite::types::Type::Text,
+                                            Box::new(error),
+                                        )
+                                    },
+                                )?,
+                            },
+                            ProjectOutputRecord {
+                                id: row.get(4)?,
+                                project_id: row.get(5)?,
+                                output_id: row.get(6)?,
+                                kind: row.get(7)?,
+                                site_id: row.get(8)?,
+                                site_name: row.get(9)?,
+                                branch: row.get(10)?,
+                                path: row.get(11)?,
+                                spa: spa_raw != 0,
+                            },
+                        )),
+                    )
+                },
+            )
+            .optional()?;
+        match row {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn active_project_collaborator_by_email(
+        &self,
+        project_id: &str,
+        email: &str,
+    ) -> Result<Option<ProjectCollaboratorRecord>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT pc.project_id, pc.principal_id, pc.role, p.email, p.pubkey
+                 FROM project_collaborators pc
+                 JOIN principals p ON p.id = pc.principal_id
+                 WHERE pc.project_id = ?1
+                   AND p.email = ?2
+                   AND pc.removed_at IS NULL",
+                params![project_id, email],
+                Self::row_to_project_collaborator,
+            )
+            .optional()?;
+        match row {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn active_project_collaborator_by_principal(
+        &self,
+        project_id: &str,
+        principal_id: &str,
+    ) -> Result<Option<ProjectCollaboratorRecord>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT pc.project_id, pc.principal_id, pc.role, p.email, p.pubkey
+                 FROM project_collaborators pc
+                 JOIN principals p ON p.id = pc.principal_id
+                 WHERE pc.project_id = ?1
+                   AND pc.principal_id = ?2
+                   AND pc.removed_at IS NULL",
+                params![project_id, principal_id],
+                Self::row_to_project_collaborator,
+            )
+            .optional()?;
+        match row {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn active_project_collaborators(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ProjectCollaboratorRecord>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT pc.project_id, pc.principal_id, pc.role, p.email, p.pubkey
+             FROM project_collaborators pc
+             JOIN principals p ON p.id = pc.principal_id
+             WHERE pc.project_id = ?1
+               AND pc.removed_at IS NULL
+             ORDER BY pc.role, p.email, p.pubkey",
+        )?;
+        let rows = stmt.query_map(params![project_id], Self::row_to_project_collaborator)?;
+        let mut out = Vec::new();
+        // Bounded by the project collaborator cap enforced by the engine.
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn apply_project(
+        &mut self,
+        owner_pubkey: &str,
+        slug: &str,
+        outputs: &[ProjectOutputApply],
+        collaborators: &[ProjectCollaboratorApply],
+        now: u64,
+    ) -> Result<ProjectApplyStoreOutcome, StoreError> {
+        assert!(owner_pubkey.len() == 64);
+        assert!(!slug.is_empty());
+        let tx = self.conn.transaction()?;
+
+        let owner_principal_id = ensure_native_principal(
+            &tx,
+            owner_pubkey,
+            ids::new_id(ids::PRINCIPAL_ID_PREFIX),
+            now,
+        )?;
+
+        let existing_project = tx
+            .query_row(
+                "SELECT id, slug, owner_principal_id, visibility
+                 FROM projects WHERE slug = ?1",
+                params![slug],
+                Self::row_to_project,
+            )
+            .optional()?;
+        let (project, project_created) = match existing_project {
+            Some(result) => {
+                let project = result?;
+                if project.owner_principal_id != owner_principal_id {
+                    return Err(StoreError::Conflict("project slug already exists"));
+                }
+                tx.execute(
+                    "UPDATE projects SET updated_at = ?1 WHERE id = ?2",
+                    params![now, project.id],
+                )?;
+                (project, false)
+            }
+            None => {
+                let project_id = ids::new_id(ids::PROJECT_ID_PREFIX);
+                tx.execute(
+                    "INSERT INTO projects (id, slug, owner_principal_id, visibility, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, 'private', ?4, ?4)",
+                    params![project_id, slug, owner_principal_id, now],
+                )?;
+                (
+                    ProjectRecord {
+                        id: project_id,
+                        slug: slug.to_string(),
+                        owner_principal_id: owner_principal_id.clone(),
+                        visibility: Visibility::Private,
+                    },
+                    true,
+                )
+            }
+        };
+
+        tx.execute(
+            "INSERT INTO project_collaborators
+                (project_id, principal_id, role, added_by_principal_id, added_at, removed_at)
+             VALUES (?1, ?2, 'owner', ?2, ?3, NULL)
+             ON CONFLICT(project_id, principal_id) DO UPDATE SET
+                role = 'owner',
+                removed_at = NULL",
+            params![project.id, owner_principal_id, now],
+        )?;
+
+        let mut applied_outputs = Vec::with_capacity(outputs.len());
+        // Bounded by MAX_PROJECT_OUTPUTS, validated before this call.
+        for output in outputs {
+            let existing = tx
+                .query_row(
+                    "SELECT id, project_id, output_id, kind, site_id, site_name, branch, output_path, spa_fallback
+                     FROM project_outputs
+                     WHERE project_id = ?1 AND output_id = ?2",
+                    params![project.id, output.output_id],
+                    Self::row_to_project_output,
+                )
+                .optional()?;
+            let (record, created) = match existing {
+                Some(result) => {
+                    let record = result?;
+                    if record.kind != output.kind || record.site_name != output.site_name {
+                        return Err(StoreError::Conflict(
+                            "project output kind or site name cannot change",
+                        ));
+                    }
+                    tx.execute(
+                        "UPDATE project_outputs
+                         SET branch = ?1, output_path = ?2, spa_fallback = ?3, updated_at = ?4
+                         WHERE id = ?5",
+                        params![output.branch, output.path, output.spa, now, record.id],
+                    )?;
+                    (
+                        ProjectOutputRecord {
+                            branch: output.branch.clone(),
+                            path: output.path.clone(),
+                            spa: output.spa,
+                            ..record
+                        },
+                        false,
+                    )
+                }
+                None => {
+                    let claimed: Option<i64> = tx
+                        .query_row(
+                            "SELECT 1 FROM name_claims WHERE name = ?1 AND status = 'active'",
+                            params![output.site_name],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    if claimed.is_some() {
+                        return Err(StoreError::Conflict("site name already claimed"));
+                    }
+
+                    let site_id = ids::new_id(ids::SITE_ID_PREFIX);
+                    let claim_id = ids::new_id(ids::CLAIM_ID_PREFIX);
+                    let project_output_id = ids::new_id(ids::PROJECT_OUTPUT_ID_PREFIX);
+                    let site_pubkey = hex::encode(&ids::random_32());
+                    tx.execute(
+                        "INSERT INTO sites
+                            (id, owner_pubkey, owner_email, site_pubkey, status, visibility, active_version_id, created_at, updated_at)
+                         VALUES (?1, ?2, NULL, ?3, 'claimed_unpublished', 'private', NULL, ?4, ?4)",
+                        params![site_id, owner_pubkey, site_pubkey, now],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO name_claims (id, site_id, name, status, released_at, created_at)
+                         VALUES (?1, ?2, ?3, 'active', NULL, ?4)",
+                        params![claim_id, site_id, output.site_name, now],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO project_outputs
+                            (id, project_id, output_id, kind, site_id, site_name, branch, output_path, spa_fallback, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                        params![
+                            project_output_id,
+                            project.id,
+                            output.output_id,
+                            output.kind,
+                            site_id,
+                            output.site_name,
+                            output.branch,
+                            output.path,
+                            output.spa,
+                            now
+                        ],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO site_events (site_id, action, actor_pubkey, metadata, created_at)
+                         VALUES (?1, 'project_output_created', ?2, '{}', ?3)",
+                        params![site_id, owner_pubkey, now],
+                    )?;
+                    (
+                        ProjectOutputRecord {
+                            id: project_output_id,
+                            project_id: project.id.clone(),
+                            output_id: output.output_id.clone(),
+                            kind: output.kind.clone(),
+                            site_id,
+                            site_name: output.site_name.clone(),
+                            branch: output.branch.clone(),
+                            path: output.path.clone(),
+                            spa: output.spa,
+                        },
+                        true,
+                    )
+                }
+            };
+            applied_outputs.push(AppliedProjectOutput { record, created });
+        }
+
+        let mut applied_collaborators = Vec::with_capacity(collaborators.len());
+        // Bounded by the request size checked by the engine.
+        for collaborator in collaborators {
+            let principal_id = ensure_external_principal(
+                &tx,
+                &collaborator.email,
+                ids::new_id(ids::PRINCIPAL_ID_PREFIX),
+                now,
+            )?;
+            let existed: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM project_collaborators
+                     WHERE project_id = ?1 AND principal_id = ?2 AND removed_at IS NULL",
+                    params![project.id, principal_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            tx.execute(
+                "INSERT INTO project_collaborators
+                    (project_id, principal_id, role, added_by_principal_id, added_at, removed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+                 ON CONFLICT(project_id, principal_id) DO UPDATE SET
+                    role = ?3,
+                    added_by_principal_id = ?4,
+                    removed_at = NULL",
+                params![
+                    project.id,
+                    principal_id,
+                    collaborator.role.as_str(),
+                    owner_principal_id,
+                    now
+                ],
+            )?;
+            applied_collaborators.push(AppliedProjectCollaborator {
+                record: ProjectCollaboratorRecord {
+                    project_id: project.id.clone(),
+                    principal_id,
+                    role: collaborator.role,
+                    email: Some(collaborator.email.clone()),
+                    pubkey: None,
+                },
+                created: existed.is_none(),
+            });
+        }
+
+        let output_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM project_outputs WHERE project_id = ?1",
+            params![project.id],
+            |row| row.get(0),
+        )?;
+        if output_count == 0 {
+            return Err(StoreError::CorruptState(
+                "project has no outputs after apply",
+            ));
+        }
+
+        tx.commit()?;
+        Ok(ProjectApplyStoreOutcome {
+            project,
+            created: project_created,
+            outputs: applied_outputs,
+            collaborators: applied_collaborators,
+        })
+    }
+
+    pub fn create_git_credential(
+        &mut self,
+        credential_id: &str,
+        project_id: &str,
+        principal_id: &str,
+        token_hash: &str,
+        expires_at: Option<u64>,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        assert!(token_hash.len() == 64);
+        self.conn.execute(
+            "INSERT INTO git_credentials
+                (id, project_id, principal_id, token_hash, created_at, expires_at, revoked_at, last_used_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL)",
+            params![credential_id, project_id, principal_id, token_hash, now, expires_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn git_credential_by_id(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<GitCredentialRecord>, StoreError> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, project_id, principal_id, token_hash, expires_at, revoked_at
+                 FROM git_credentials WHERE id = ?1",
+                params![credential_id],
+                |row| {
+                    Ok(GitCredentialRecord {
+                        id: row.get(0)?,
+                        project_id: row.get(1)?,
+                        principal_id: row.get(2)?,
+                        token_hash: row.get(3)?,
+                        expires_at: row.get::<_, Option<i64>>(4)?.map(|value| value as u64),
+                        revoked_at: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_git_ref_event(
+        &mut self,
+        project_id: &str,
+        ref_name: &str,
+        old_sha: &str,
+        new_sha: &str,
+        actor_principal_id: &str,
+        actor_agent_key_id: Option<&str>,
+        git_credential_id: &str,
+        now: u64,
+    ) -> Result<(GitRefEventRecord, bool), StoreError> {
+        assert!(old_sha.len() == 40);
+        assert!(new_sha.len() == 40);
+        let tx = self.conn.transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO git_ref_events
+                (project_id, ref_name, old_sha, new_sha, actor_principal_id,
+                 actor_agent_key_id, git_credential_id, project_output_id,
+                 status, version_id, error, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 'pending', NULL, NULL, ?8, ?8)",
+            params![
+                project_id,
+                ref_name,
+                old_sha,
+                new_sha,
+                actor_principal_id,
+                actor_agent_key_id,
+                git_credential_id,
+                now
+            ],
+        )?;
+        let event = tx.query_row(
+            "SELECT id, project_id, ref_name, old_sha, new_sha, actor_principal_id,
+                    actor_agent_key_id, git_credential_id, project_output_id,
+                    status, version_id, error
+             FROM git_ref_events
+             WHERE project_id = ?1 AND ref_name = ?2 AND new_sha = ?3",
+            params![project_id, ref_name, new_sha],
+            Self::row_to_git_ref_event,
+        )??;
+        if event.old_sha != old_sha {
+            return Err(StoreError::Conflict(
+                "git ref event replay has different old sha",
+            ));
+        }
+        tx.commit()?;
+        Ok((event, inserted > 0))
+    }
+
+    pub fn mark_git_ref_event_deployed(
+        &mut self,
+        event_id: i64,
+        project_output_id: &str,
+        version_id: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        let updated = self.conn.execute(
+            "UPDATE git_ref_events
+             SET status = 'deployed',
+                 project_output_id = ?1,
+                 version_id = ?2,
+                 error = NULL,
+                 updated_at = ?3
+             WHERE id = ?4 AND status = 'pending'",
+            params![project_output_id, version_id, now, event_id],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::Conflict("git ref event is not pending"));
+        }
+        Ok(())
+    }
+
+    pub fn mark_git_ref_event_ignored(
+        &mut self,
+        event_id: i64,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        let updated = self.conn.execute(
+            "UPDATE git_ref_events
+             SET status = 'ignored', updated_at = ?1
+             WHERE id = ?2 AND status = 'pending'",
+            params![now, event_id],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::Conflict("git ref event is not pending"));
+        }
+        Ok(())
+    }
+
+    pub fn mark_git_ref_event_failed(
+        &mut self,
+        event_id: i64,
+        error: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        let updated = self.conn.execute(
+            "UPDATE git_ref_events
+             SET status = 'failed', error = ?1, updated_at = ?2
+             WHERE id = ?3 AND status = 'pending'",
+            params![error, now, event_id],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::Conflict("git ref event is not pending"));
+        }
+        Ok(())
     }
 
     // ---- sites and claims ------------------------------------------------
@@ -1411,6 +2209,127 @@ fn map_unique_violation(error: rusqlite::Error, conflict: &'static str) -> Store
     StoreError::Sqlite(error)
 }
 
+fn ensure_native_principal(
+    tx: &rusqlite::Transaction<'_>,
+    pubkey: &str,
+    principal_id: String,
+    now: u64,
+) -> Result<String, StoreError> {
+    assert!(pubkey.len() == 64);
+    tx.execute(
+        "INSERT OR IGNORE INTO principals (id, kind, email, pubkey, created_at, updated_at)
+         VALUES (?1, 'native', NULL, ?2, ?3, ?3)",
+        params![principal_id, pubkey, now],
+    )?;
+    let id: String = tx.query_row(
+        "SELECT id FROM principals WHERE pubkey = ?1",
+        params![pubkey],
+        |row| row.get(0),
+    )?;
+    Ok(id)
+}
+
+fn ensure_external_principal(
+    tx: &rusqlite::Transaction<'_>,
+    email: &str,
+    principal_id: String,
+    now: u64,
+) -> Result<String, StoreError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO principals (id, kind, email, pubkey, created_at, updated_at)
+         VALUES (?1, 'external', ?2, NULL, ?3, ?3)",
+        params![principal_id, email, now],
+    )?;
+    let id: String = tx.query_row(
+        "SELECT id FROM principals WHERE email = ?1",
+        params![email],
+        |row| row.get(0),
+    )?;
+    Ok(id)
+}
+
+impl Store {
+    fn row_to_project(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<ProjectRecord, StoreError>> {
+        let visibility_raw: String = row.get(3)?;
+        Ok(Ok(ProjectRecord {
+            id: row.get(0)?,
+            slug: row.get(1)?,
+            owner_principal_id: row.get(2)?,
+            visibility: Visibility::from_db(&visibility_raw).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        }))
+    }
+
+    fn row_to_project_output(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<ProjectOutputRecord, StoreError>> {
+        let spa_raw: i64 = row.get(8)?;
+        Ok(Ok(ProjectOutputRecord {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            output_id: row.get(2)?,
+            kind: row.get(3)?,
+            site_id: row.get(4)?,
+            site_name: row.get(5)?,
+            branch: row.get(6)?,
+            path: row.get(7)?,
+            spa: spa_raw != 0,
+        }))
+    }
+
+    fn row_to_project_collaborator(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<ProjectCollaboratorRecord, StoreError>> {
+        let role_raw: String = row.get(2)?;
+        Ok(Ok(ProjectCollaboratorRecord {
+            project_id: row.get(0)?,
+            principal_id: row.get(1)?,
+            role: ProjectCollaboratorRole::from_db(&role_raw).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            email: row.get(3)?,
+            pubkey: row.get(4)?,
+        }))
+    }
+
+    fn row_to_git_ref_event(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<GitRefEventRecord, StoreError>> {
+        let status_raw: String = row.get(9)?;
+        Ok(Ok(GitRefEventRecord {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            ref_name: row.get(2)?,
+            old_sha: row.get(3)?,
+            new_sha: row.get(4)?,
+            actor_principal_id: row.get(5)?,
+            actor_agent_key_id: row.get(6)?,
+            git_credential_id: row.get(7)?,
+            project_output_id: row.get(8)?,
+            status: GitRefEventStatus::from_db(&status_raw).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            version_id: row.get(10)?,
+            error: row.get(11)?,
+        }))
+    }
+}
+
 fn publish_event_metadata(
     actor_pubkey: Option<&str>,
     actor_email: Option<&str>,
@@ -1460,6 +2379,181 @@ mod tests {
             .create_site_with_claim("site_1", "claim_1", name, OWNER, SITE_KEY, NOW)
             .unwrap();
         store
+    }
+
+    fn project_output(site_name: &str) -> ProjectOutputApply {
+        ProjectOutputApply {
+            output_id: "mockup".to_string(),
+            kind: "site".to_string(),
+            site_name: site_name.to_string(),
+            branch: "main".to_string(),
+            path: ".".to_string(),
+            spa: false,
+        }
+    }
+
+    #[test]
+    fn project_apply_creates_site_output_and_replays() {
+        let mut store = Store::open_in_memory().unwrap();
+        let first = store
+            .apply_project(
+                OWNER,
+                "finitechat-native",
+                &[project_output("finitechat-native-mockup")],
+                &[ProjectCollaboratorApply {
+                    email: "skyler@example.com".to_string(),
+                    role: ProjectCollaboratorRole::Editor,
+                }],
+                NOW,
+            )
+            .unwrap();
+        assert!(first.created);
+        assert_eq!(first.project.slug, "finitechat-native");
+        assert_eq!(first.outputs.len(), 1);
+        assert!(first.outputs[0].created);
+        assert_eq!(
+            first.outputs[0].record.site_name,
+            "finitechat-native-mockup"
+        );
+        assert!(
+            store
+                .site_by_name("finitechat-native-mockup")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(first.collaborators.len(), 1);
+        assert!(first.collaborators[0].created);
+
+        let replay = store
+            .apply_project(
+                OWNER,
+                "finitechat-native",
+                &[project_output("finitechat-native-mockup")],
+                &[ProjectCollaboratorApply {
+                    email: "skyler@example.com".to_string(),
+                    role: ProjectCollaboratorRole::Editor,
+                }],
+                NOW + 1,
+            )
+            .unwrap();
+        assert!(!replay.created);
+        assert!(!replay.outputs[0].created);
+        assert!(!replay.collaborators[0].created);
+        assert_eq!(replay.project.id, first.project.id);
+        assert_eq!(store.project_outputs(&first.project.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn project_apply_rejects_conflicting_slug_and_site_name() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .apply_project(
+                OWNER,
+                "finitechat-native",
+                &[project_output("finitechat-native-mockup")],
+                &[],
+                NOW,
+            )
+            .unwrap();
+
+        let slug_conflict = store.apply_project(
+            OTHER_KEY,
+            "finitechat-native",
+            &[project_output("other-mockup")],
+            &[],
+            NOW + 1,
+        );
+        assert!(matches!(
+            slug_conflict,
+            Err(StoreError::Conflict("project slug already exists"))
+        ));
+
+        let site_conflict = store.apply_project(
+            OWNER,
+            "another-project",
+            &[project_output("finitechat-native-mockup")],
+            &[],
+            NOW + 2,
+        );
+        assert!(matches!(
+            site_conflict,
+            Err(StoreError::Conflict("site name already claimed"))
+        ));
+    }
+
+    #[test]
+    fn git_ref_events_are_idempotent_and_reject_conflicting_replay() {
+        let mut store = Store::open_in_memory().unwrap();
+        let applied = store
+            .apply_project(
+                OWNER,
+                "finitechat-native",
+                &[project_output("finitechat-native-mockup")],
+                &[],
+                NOW,
+            )
+            .unwrap();
+        let credential_id = "gcred_11111111111111111111111111111111";
+        let token_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        store
+            .create_git_credential(
+                credential_id,
+                &applied.project.id,
+                &applied.project.owner_principal_id,
+                token_hash,
+                None,
+                NOW + 1,
+            )
+            .unwrap();
+
+        let old_sha = "0000000000000000000000000000000000000000";
+        let new_sha = "1111111111111111111111111111111111111111";
+        let (event, inserted) = store
+            .record_git_ref_event(
+                &applied.project.id,
+                "refs/heads/main",
+                old_sha,
+                new_sha,
+                &applied.project.owner_principal_id,
+                None,
+                credential_id,
+                NOW + 2,
+            )
+            .unwrap();
+        assert!(inserted);
+        assert_eq!(event.status, GitRefEventStatus::Pending);
+
+        let (replay, replay_inserted) = store
+            .record_git_ref_event(
+                &applied.project.id,
+                "refs/heads/main",
+                old_sha,
+                new_sha,
+                &applied.project.owner_principal_id,
+                None,
+                credential_id,
+                NOW + 3,
+            )
+            .unwrap();
+        assert!(!replay_inserted);
+        assert_eq!(replay.id, event.id);
+
+        let conflicting = store.record_git_ref_event(
+            &applied.project.id,
+            "refs/heads/main",
+            "2222222222222222222222222222222222222222",
+            new_sha,
+            &applied.project.owner_principal_id,
+            None,
+            credential_id,
+            NOW + 4,
+        );
+        assert!(matches!(
+            conflicting,
+            Err(StoreError::Conflict(
+                "git ref event replay has different old sha"
+            ))
+        ));
     }
 
     #[test]

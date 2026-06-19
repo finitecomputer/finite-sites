@@ -133,11 +133,30 @@ async fn serve_path(
         let generated = {
             let engine = state.engine.lock().expect("engine mutex never poisoned");
             match engine.should_generate_llms_txt(&site) {
-                Ok(true) => Some(crate::llms::generated_llms_txt(
-                    &site.name,
-                    &engine.site_url(&site.name),
-                    &state.api_url,
-                )),
+                Ok(true) => match engine.project_output_for_site(&site) {
+                    Ok(Some((project, output))) => {
+                        let git_remote_url = format!("{}/{}.git", state.git_base_url, project.slug);
+                        Some(crate::llms::generated_project_llms_txt(
+                            &site.name,
+                            &engine.site_url(&site.name),
+                            &state.api_url,
+                            &project.slug,
+                            &git_remote_url,
+                            &output.output_id,
+                            &output.branch,
+                            &output.path,
+                        ))
+                    }
+                    Ok(None) => Some(crate::llms::generated_llms_txt(
+                        &site.name,
+                        &engine.site_url(&site.name),
+                        &state.api_url,
+                    )),
+                    Err(error) => {
+                        eprintln!("finitesitesd project llms.txt error: {error}");
+                        return internal_page();
+                    }
+                },
                 Ok(false) => None,
                 Err(error) => {
                     eprintln!("finitesitesd llms.txt error: {error}");

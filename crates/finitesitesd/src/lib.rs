@@ -5,6 +5,7 @@
 //!   allow     add an operator publish grant for a pubkey (hex or npub)
 //!   disallow  revoke an operator publish grant
 //!   allowed   list active publishing grants
+//!   pre-user-reset  wipe product state during pre-user development
 //!
 //! All subcommands take `--data DIR`; the registry database, blob store,
 //! cookie secret, and dev-mail outbox live under that directory.
@@ -12,6 +13,7 @@
 pub mod api;
 pub mod apps;
 pub mod content_type;
+pub mod git;
 pub mod limiter;
 pub mod llms;
 pub mod mailer;
@@ -34,6 +36,7 @@ pub struct ServeOptions {
     pub listen: SocketAddr,
     pub base_domain: String,
     pub api_url: String,
+    pub git_base_url: String,
     pub site_url_scheme: String,
     pub site_url_port: Option<u16>,
     /// `None` = dev mailer (outbox files). The API key for an HTTP provider
@@ -69,6 +72,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "allow" => allowlist_mutate(&args[1..], true),
         "disallow" => allowlist_mutate(&args[1..], false),
         "allowed" => allowlist_list(&args[1..]),
+        "pre-user-reset" => pre_user_reset(&args[1..]),
         "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -80,12 +84,14 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 fn usage() -> String {
     "usage:\n  finitesitesd serve --data DIR [--listen 127.0.0.1:8787] \
      [--base-domain sites.localhost] [--api-url http://127.0.0.1:8787] \
+     [--git-url http://git.sites.localhost:8787] \
      [--site-scheme http] [--site-port PORT|none] \
      [--mailer dev|resend|postmark] [--mail-from ADDR] \
      [--app-runner none|systemd|kata] [--app-idle-timeout SECONDS]\n  \
      finitesitesd allow --data DIR PUBKEY_OR_NPUB [--note TEXT]\n  \
      finitesitesd disallow --data DIR PUBKEY_OR_NPUB\n  \
-     finitesitesd allowed --data DIR"
+     finitesitesd allowed --data DIR\n  \
+     finitesitesd pre-user-reset --data DIR --confirm-wipe-product-data yes"
         .to_string()
 }
 
@@ -156,6 +162,21 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
                 .map_err(|_| "invalid --site-port".to_string())?,
         ),
     };
+    let git_base_url = match flag_value(&flags, "git-url") {
+        Some(raw) => {
+            if raw.ends_with('/') {
+                return Err("--git-url must not end with /".to_string());
+            }
+            raw.to_string()
+        }
+        None => {
+            let port_part = match site_url_port {
+                Some(port) => format!(":{port}"),
+                None => String::new(),
+            };
+            format!("{site_url_scheme}://git.{base_domain}{port_part}")
+        }
+    };
     let mail_provider = match flag_value(&flags, "mailer") {
         None | Some("dev") => None,
         Some(raw) => Some(
@@ -190,6 +211,7 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         listen,
         base_domain,
         api_url,
+        git_base_url,
         site_url_scheme,
         site_url_port,
         mail_provider,
@@ -328,4 +350,91 @@ fn allowlist_list(args: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn pre_user_reset(args: &[String]) -> Result<(), String> {
+    let (flags, positionals) = parse_flags(args)?;
+    if !positionals.is_empty() {
+        return Err(format!("unexpected argument `{}`", positionals[0]));
+    }
+    let data_dir = flag_value(&flags, "data").ok_or("--data DIR is required")?;
+    let confirmed = flag_value(&flags, "confirm-wipe-product-data") == Some("yes");
+    if !confirmed {
+        return Err(
+            "pre-user-reset is destructive; pass --confirm-wipe-product-data yes".to_string(),
+        );
+    }
+    let wiped = reset_product_data(Path::new(data_dir))?;
+    if wiped.is_empty() {
+        println!("no Finite Sites product data found under {data_dir}");
+    } else {
+        println!("wiped Finite Sites product data under {data_dir}:");
+        // Bounded by the fixed reset path list.
+        for item in wiped {
+            println!("- {item}");
+        }
+    }
+    println!("preserved host/runtime config such as cookie-secret and deployment files");
+    Ok(())
+}
+
+fn reset_product_data(data_dir: &Path) -> Result<Vec<String>, String> {
+    std::fs::create_dir_all(data_dir)
+        .map_err(|error| format!("cannot create data dir: {error}"))?;
+    let product_entries = [
+        "registry.db",
+        "registry.db-wal",
+        "registry.db-shm",
+        "blobs",
+        "outbox",
+        "apps",
+        "git",
+    ];
+    let mut wiped = Vec::new();
+    // Bounded by product_entries above.
+    for entry in product_entries {
+        let path = data_dir.join(entry);
+        if !path.exists() {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        if metadata.is_dir() {
+            std::fs::remove_dir_all(&path)
+                .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+        } else {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+        }
+        wiped.push(entry.to_string());
+    }
+    Ok(wiped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_user_reset_wipes_product_data_and_preserves_runtime_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("registry.db"), b"db").unwrap();
+        std::fs::write(dir.path().join("registry.db-wal"), b"wal").unwrap();
+        std::fs::create_dir(dir.path().join("blobs")).unwrap();
+        std::fs::write(dir.path().join("blobs").join("blob"), b"x").unwrap();
+        std::fs::create_dir(dir.path().join("git")).unwrap();
+        std::fs::write(dir.path().join("cookie-secret"), b"secret").unwrap();
+
+        let wiped = reset_product_data(dir.path()).unwrap();
+        assert!(wiped.contains(&"registry.db".to_string()));
+        assert!(wiped.contains(&"registry.db-wal".to_string()));
+        assert!(wiped.contains(&"blobs".to_string()));
+        assert!(wiped.contains(&"git".to_string()));
+        assert!(!dir.path().join("registry.db").exists());
+        assert!(!dir.path().join("blobs").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("cookie-secret")).unwrap(),
+            "secret"
+        );
+    }
 }

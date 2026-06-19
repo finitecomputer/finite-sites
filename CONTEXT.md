@@ -5,12 +5,62 @@ with exactly these meanings.
 
 - **Finite Site**: one published website living at `{name}.{base domain}`,
   owned by one User Key, with an immutable version history.
+- **Principal**: the human-facing identity permissions attach to. A Principal
+  may be represented by an email address during bootstrap and by verified key
+  identities once available.
+- **Native Principal**: a Principal known by npub inside Finite surfaces, such
+  as a chat participant. Native shares can target this Principal directly.
+- **External Principal**: a Principal identified by email because they are not
+  yet a Finite user. External shares use email verification.
+- **Project Repository**: the editable git history for a project. It may begin
+  with data, grow logic around that data, and later produce one or more Project
+  Outputs. A Project Repository may exist before any public-facing UI exists.
+- **Project Slug**: the stable URL-safe identifier for a Project Repository.
+  It is separate from Site Name, though simple projects may default them to
+  the same string.
+- **Project Output**: a user-facing artifact produced from a Project
+  Repository, such as a Finite Site or a generated document.
+- **Deploy Output**: committed files selected from a Project Repository and
+  materialized as a Version. Agents produce Deploy Outputs; Finite Sites
+  validates and serves them.
+- **Deploy Branch**: the Project Repository branch whose pushed commits create
+  new Versions automatically. Pushing to a Deploy Branch updates content but
+  does not change visibility or permissions.
+- **Project Visibility**: who may read a Project Repository. It is private by
+  default and independent from the Visibility of any Project Output.
 - **Site Name**: a lowercase DNS label (3–63 chars), globally unique,
   first-come, claimed before any upload. Reserved names are rejected.
+- **Pre-User Reset**: a destructive operator action that wipes Finite Sites
+  product state during pre-user development so examples can be redeployed
+  through the current model without legacy adapters.
 - **User Key / Owner**: the user's nostr keypair (npub). It claims names,
   lists sites, and may change sharing. The publish grant cache is keyed on it.
 - **Owner Email**: the human-facing email label for a site's owner. It may
   publish through a verified Email Key, but it does not replace the User Key.
+- **Project Collaborator**: an email address or key identity granted edit
+  rights to a Project Repository. Project collaboration is the default edit
+  permission; individual Project Outputs may add narrower rules later.
+- **Agent Key**: a distinct npub controlled by an agent or device and linked
+  to a Principal. Agent Keys authenticate work without making the agent the
+  human owner.
+- **Agent Delegation**: a Principal-approved authorization that lets one Agent
+  Key act for that Principal on one Project Repository, with bounded
+  capabilities.
+- **Git Remote**: the standard git clone/push endpoint for a Project
+  Repository, canonically `https://git.finite.chat/{project}.git` in
+  production. Agents use normal git commands against it; Finite Sites maps
+  authenticated pushes to Project Repository permissions.
+- **Git Credential**: a revocable, scoped HTTPS credential minted after an
+  email verification or Key Challenge. It lets standard git clients clone or
+  push one Project Repository according to the Principal's permissions.
+- **Agent-Safe CLI**: a command surface that agents can inspect and operate
+  without out-of-band documentation. It provides structured input/output,
+  dry-run validation, and machine-readable descriptions of available commands
+  and workflows.
+- **Project Config**: a project-level configuration file, conventionally
+  `finite.toml`, describing Project Outputs such as sites or documents.
+- **Key Challenge**: proof of control for a nostr key. The private key never
+  leaves the user's machine; the actor signs a bounded challenge instead.
 - **Site Key**: a per-site nostr keypair generated in the agent workspace at
   `.finite/sites/NAME.env`, registered at claim time. It signs publishes and
   sharing changes for that one site. Never committed, never uploaded.

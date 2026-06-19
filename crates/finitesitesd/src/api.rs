@@ -12,7 +12,8 @@ use axum::routing::{get, post, put};
 
 use finitesites_engine::EngineError;
 use finitesites_proto::dto::{
-    ApiErrorBody, ClaimRequest, ClaimResponse, PublishBeginRequest, PublishBeginResponse,
+    ApiErrorBody, ClaimRequest, ClaimResponse, GitAuthRequest, GitAuthResponse,
+    ProjectApplyRequest, ProjectApplyResponse, PublishBeginRequest, PublishBeginResponse,
     PublishFinalizeResponse, SharingRequest, SiteListResponse,
 };
 use finitesites_proto::limits::{MAX_API_BODY_BYTES, MAX_APP_BUNDLE_BYTES};
@@ -29,6 +30,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/email-auth/request", post(request_email_login))
         .route("/api/v1/email-auth/redeem", post(redeem_email_login))
         .route("/api/v1/sites/claim", post(claim))
+        .route("/api/v1/projects/apply", post(apply_project))
+        .route("/api/v1/projects/{slug}/git-auth", post(auth_git))
         .route("/api/v1/sites", get(list_sites))
         .route("/api/v1/sites/{name}", get(site_status))
         .route("/api/v1/sites/{name}/sharing", post(set_sharing))
@@ -99,13 +102,16 @@ impl From<EngineError> for ApiError {
                 ApiError::new(StatusCode::FORBIDDEN, "not_authorized", message)
             }
             EngineError::NameTaken => ApiError::new(StatusCode::CONFLICT, "name_taken", message),
-            EngineError::SiteNotFound | EngineError::PublishNotFound => {
+            EngineError::SiteNotFound
+            | EngineError::PublishNotFound
+            | EngineError::ProjectNotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, "not_found", message)
             }
             EngineError::TooManySites
             | EngineError::TooManyShares
             | EngineError::TooManyEditors
-            | EngineError::TooManyEmailKeys => {
+            | EngineError::TooManyEmailKeys
+            | EngineError::TooManyProjectCollaborators => {
                 ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "limit_exceeded", message)
             }
             EngineError::Validation(_) | EngineError::Proto(_) => {
@@ -293,6 +299,56 @@ async fn claim(
         already_claimed: outcome.already_claimed,
         owner_email: outcome.site.owner_email,
     }))
+}
+
+async fn apply_project(
+    State(state): State<Arc<AppState>>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ProjectApplyResponse>, ApiError> {
+    let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: ProjectApplyRequest = parse_json_body(&body)?;
+    let git_remote_url = git_remote_url(&state, &request.config.project.slug);
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .apply_project(&owner, &request, git_remote_url, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    if !response.dry_run
+        && let Some(project_id) = response.project_id.as_deref()
+        && let Err(error) = crate::git::ensure_bare_project_repo(&state.data_dir, project_id)
+    {
+        eprintln!("finitesitesd project repo setup failed: {error}");
+        return Err(internal_error("git repository setup failure"));
+    }
+    Ok(Json(response))
+}
+
+async fn auth_git(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<GitAuthResponse>, ApiError> {
+    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: GitAuthRequest = parse_json_body(&body)?;
+    let git_remote_url = git_remote_url(&state, &slug);
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .mint_git_credential(&actor, &slug, &request.email, git_remote_url, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    Ok(Json(response))
+}
+
+fn git_remote_url(state: &AppState, slug: &str) -> String {
+    format!("{}/{}.git", state.git_base_url, slug)
 }
 
 async fn list_sites(

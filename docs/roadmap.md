@@ -63,6 +63,69 @@ a rewrite.
 - Same auth (site key = machine key), same sharing gate in front of HTTP
   machines, same `fsite`-style CLI surface (`fsite machine ...`).
 
+## Project Repository collaboration milestones
+
+ADR-0019 moves collaboration from site-first Source Snapshots to
+Project-first git. The milestones below keep the full product shape visible
+while letting the first implementation stay focused.
+
+### Milestone 1: Project Git Spine
+
+- Pre-User Reset wipes product data so examples can be redeployed without
+  legacy adapters.
+- Registry has final-shaped Principals, Agent Keys, Projects, Project
+  Collaborators, Project Outputs, and Git Credentials.
+- `fsite project apply --json ... --dry-run --output json` creates a Project
+  with one site output.
+- `fsite describe workflow project-config --output json` documents the
+  `finite.toml` schema and example configs.
+- `fsite auth git PROJECT --email EMAIL --output json` mints a scoped HTTPS
+  Git Credential.
+- `git clone https://git.finite.chat/PROJECT.git` and `git push origin main`
+  work with standard git through `git-http-backend` behind Finite auth.
+- Pushing the Deploy Branch creates immutable Versions from committed bytes
+  selected by the root `finite.toml`. The deploy system does not infer output
+  paths; `fsite` workflows generate config for happy paths.
+- Git `post-receive` records durable ref-change events; a reconciler creates
+  Versions outside the git protocol request.
+- Tests aggressively cover this chain: successful push/deploy, ignored
+  non-deploy refs, invalid config failure, missing output failure, process
+  crash after ref update before deploy, crash after Version creation before
+  event acknowledgement, restart reconciliation, and idempotent replay.
+- Generated `/llms.txt` prefers the git flow.
+- Existing examples are redeployed through Project-first commands only.
+
+### Milestone 2: Native Principals and Agent Delegations
+
+- Native Finite users are shared to by npub/Principal, not email.
+- Agents use distinct Agent Keys; humans approve project-scoped Agent
+  Delegations from FiniteChat.
+- Audit records both Principal and Agent Key.
+- Email remains the External Principal bootstrap path for non-Finite users.
+
+### Milestone 3: Multi-output Projects
+
+- `finite.toml` supports multiple Project Outputs.
+- `site` remains the first output kind; document/PDF outputs follow once the
+  workflow is proven.
+- Project Visibility remains independent from output Visibility.
+- Output-level permissions exist only where they are truly needed.
+
+### Milestone 4: Safer Collaboration Layer
+
+- Rollback/redeploy previous Version becomes a first-class command.
+- Branch or review flows are added only after the auto-publish Deploy Branch
+  loop is working.
+- Project history, output status, and deploy errors become machine-readable
+  CLI workflows.
+
+### Milestone 5: Protocol Interop
+
+- Add GRASP/NIP-34 support only if Finite needs decentralized repository
+  announcements, patch/issue protocol objects, interoperable servers, or repo
+  migration across servers.
+- Do not invent GRASP-equivalent protocol layers inside Finite.
+
 ## Later / optional
 
 - **nsite export**: publish kind 15128/35128 manifests + push blobs to

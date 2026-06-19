@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::PublishManifest;
+use crate::project_config::ProjectConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimRequest {
@@ -169,6 +170,82 @@ pub struct SiteSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteListResponse {
     pub sites: Vec<SiteSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectApplyRequest {
+    pub config: ProjectConfig,
+    /// True means validate and return the exact operations without mutating
+    /// registry state or writing a git repository.
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub collaborators: Vec<ProjectCollaboratorSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectCollaboratorSpec {
+    /// Milestone 1 supports External Principals by verified email. Native
+    /// npub shares use the same role shape once Agent Delegations land.
+    pub email: String,
+    #[serde(default = "default_project_role")]
+    pub role: String,
+}
+
+fn default_project_role() -> String {
+    "editor".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectApplyResponse {
+    pub dry_run: bool,
+    pub project_id: Option<String>,
+    pub slug: String,
+    pub created: bool,
+    pub git_remote_url: String,
+    pub finite_toml: String,
+    pub outputs: Vec<ProjectOutputSummary>,
+    pub collaborators: Vec<ProjectCollaboratorSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectOutputSummary {
+    pub output_id: String,
+    pub kind: String,
+    pub site_name: String,
+    pub site_id: Option<String>,
+    pub site_url: String,
+    pub branch: String,
+    pub path: String,
+    pub spa: bool,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectCollaboratorSummary {
+    pub principal_id: Option<String>,
+    pub email: String,
+    pub role: String,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitAuthRequest {
+    /// Email identity whose verified local key signs this request.
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitAuthResponse {
+    pub project_slug: String,
+    pub git_remote_url: String,
+    pub credential_id: String,
+    /// Use as the HTTPS Basic username for standard git clients.
+    pub username: String,
+    /// Returned once. Store it in the agent's git credential helper, not in
+    /// source control or project files.
+    pub password: String,
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -57,6 +57,82 @@ Rules:
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn generated_project_llms_txt(
+    site_name: &str,
+    site_url: &str,
+    api_url: &str,
+    project_slug: &str,
+    git_remote_url: &str,
+    output_id: &str,
+    branch: &str,
+    output_path: &str,
+) -> String {
+    assert!(!site_name.is_empty());
+    assert!(!site_url.is_empty());
+    assert!(!api_url.is_empty());
+    assert!(!project_slug.is_empty());
+    assert!(!git_remote_url.is_empty());
+    format!(
+        "\
+# Finite Sites Project Editing Instructions
+
+This site is a Project Output from a Finite Project Repository. Use these instructions when a human asks you to make a change to this site.
+
+Site name: {site_name}
+Site URL: {site_url}
+Project: {project_slug}
+Output: {output_id}
+Deploy branch: {branch}
+Deploy path: {output_path}
+Git remote: {git_remote_url}
+API URL: {api_url}
+
+Use the editor email address the human gave you. Do not guess an email address, and do not publish with a different identity.
+
+Install the fsite CLI:
+
+- Download the latest release from {FSITE_REPOSITORY_URL}/releases/latest
+- Release assets are named fsite-linux-x86_64.tar.gz, fsite-macos-x86_64.tar.gz, and fsite-macos-aarch64.tar.gz
+- Or build from source with: cargo install --git {FSITE_REPOSITORY_URL} --package fsite-cli --bin fsite
+
+Configure the API:
+
+export FINITE_SITES_API=\"{api_url}\"
+
+Verify this machine for the editor email if it is not already verified:
+
+fsite email-login YOUR_EDITOR_EMAIL
+fsite email-redeem YOUR_EDITOR_EMAIL TOKEN_FROM_EMAIL
+
+Mint a scoped Git Credential and clone the Project Repository:
+
+fsite auth git {project_slug} --email YOUR_EDITOR_EMAIL --output json
+git clone {git_remote_url}
+cd {project_slug}
+
+Make the requested change:
+
+# inspect finite.toml to confirm the output path and Deploy Branch
+# edit source/data/logic as needed
+# run the project's tests and build command when discoverable
+# ensure committed deploy bytes exist at {output_path}
+git status
+git add .
+git commit -m \"Update {site_name}\"
+git push origin {branch}
+
+Rules:
+
+- Do not reconstruct source from rendered HTML. Use the Project Repository.
+- Finite Sites does not run builds; run builds yourself and commit the resulting deploy bytes.
+- Preserve a user-authored llms.txt if the project contains one.
+- Never commit `.finite/`, `.env*`, private keys, dependency directories, or build caches.
+- If authentication or authorization fails, ask the human to confirm the Project Collaborator grant for YOUR_EDITOR_EMAIL.
+"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +152,27 @@ mod tests {
         assert!(text.contains("https://github.com/finitecomputer/finite-sites/releases/latest"));
         assert!(!text.contains("skyler"));
         assert!(!text.contains("paul"));
+    }
+
+    #[test]
+    fn generated_project_text_prefers_git_flow() {
+        let text = generated_project_llms_txt(
+            "demo",
+            "https://demo.finite.chat/",
+            "https://api.finite.chat",
+            "demo-project",
+            "https://git.finite.chat/demo-project.git",
+            "site",
+            "main",
+            "dist",
+        );
+
+        assert!(text.contains("Project: demo-project"));
+        assert!(
+            text.contains("fsite auth git demo-project --email YOUR_EDITOR_EMAIL --output json")
+        );
+        assert!(text.contains("git clone https://git.finite.chat/demo-project.git"));
+        assert!(text.contains("git push origin main"));
+        assert!(!text.contains("fsite source pull"));
     }
 }
