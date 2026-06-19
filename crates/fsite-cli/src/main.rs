@@ -1183,4 +1183,22 @@ mod tests {
             Err(CliError::Usage(_))
         ));
     }
+
+    #[test]
+    fn project_example_fixture_matches_committed_config() {
+        let request: ProjectApplyRequest = serde_json::from_str(include_str!(
+            "../../../examples/project-applies/finitechat-native-mockup.json"
+        ))
+        .unwrap();
+        let config = parse_project_config_toml(include_str!(
+            "../../../examples/finitechat-native-mockup/finite.toml"
+        ))
+        .unwrap();
+
+        assert_eq!(request.config, config);
+        assert_eq!(request.config.project.slug, "finitechat-native");
+        assert_eq!(request.collaborators.len(), 1);
+        assert_eq!(request.collaborators[0].email, "skyler@example.com");
+        assert_eq!(request.collaborators[0].role, "editor");
+    }
 }

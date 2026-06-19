@@ -3,9 +3,49 @@
 Working demos for each hosting tier, smallest first. Each was published to
 finite.chat as part of platform validation.
 
+## Project Repository seed
+
+`finitechat-native-mockup` is the Project-first validation example. The
+Project Apply JSON lives outside the deploy path so the committed Project
+Repository source only contains the deployable mockup and its required
+`finite.toml`.
+
+The fixture grants `skyler@example.com` as the bootstrap editor. Replace that
+email before applying if a different External Principal should clone and push.
+
+```sh
+export FINITE_SITES_API=https://api.finite.chat
+
+fsite project apply \
+  --json examples/project-applies/finitechat-native-mockup.json \
+  --dry-run \
+  --output json \
+  --config examples/finitechat-native-mockup/finite.toml
+
+fsite project apply \
+  --json examples/project-applies/finitechat-native-mockup.json \
+  --output json \
+  --config examples/finitechat-native-mockup/finite.toml
+
+fsite email-login skyler@example.com
+fsite email-redeem skyler@example.com TOKEN_FROM_EMAIL
+fsite auth git finitechat-native --email skyler@example.com --output json
+git clone https://git.finite.chat/finitechat-native.git /tmp/finitechat-native
+rsync -a --delete examples/finitechat-native-mockup/ /tmp/finitechat-native/
+cd /tmp/finitechat-native
+git add finite.toml index.html
+git commit -m "Seed finitechat native mockup"
+git push origin main
+```
+
+Pushing `main` is the publish step. Finite Sites validates committed bytes
+selected by `finite.toml` and creates the immutable Version; it does not run
+builds.
+
 ## Tier 1: static
 
-- **hello-site** — plain files. `fsite publish NAME examples/hello-site`.
+- **hello-site** — plain files. Legacy site-first check:
+  `fsite publish NAME examples/hello-site`.
 - **spa-pushstate** — dependency-free single-page app using the history
   API. Needs `--spa` so deep links serve the shell:
   `fsite publish NAME examples/spa-pushstate --spa`.

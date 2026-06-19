@@ -190,6 +190,78 @@ Remaining gates once Cloudflare DNS is live:
 - A magic link arrives at a real inbox (after the Resend flip), logs the
   viewer in, and removing the email revokes access on refresh.
 
+## 5b. Project-first reset and example redeploy
+
+Pre-User Reset is intentionally destructive. Use it only during pre-user
+development, after an operator explicitly confirms that product data can be
+wiped. It removes registry state, blobs, git repositories, app data, outbox,
+tokens, grants, collaborators, sites, Versions, and other state under
+`/var/lib/finite-sites`; it preserves systemd units, Caddy configuration,
+environment files, installed binaries, OS users, certificates, and source
+checkouts.
+
+```sh
+sudo systemctl stop finite-saas-sites
+sudo -u finite-sites finitesitesd pre-user-reset \
+  --data /var/lib/finite-sites \
+  --confirm-wipe-product-data yes
+sudo systemctl start finite-saas-sites
+
+sudo -u finite-sites finitesitesd allow \
+  --data /var/lib/finite-sites \
+  OWNER_NPUB \
+  --note "pre-user project reset bootstrap"
+```
+
+Redeploy examples through Project Repositories, not legacy site-first publish
+commands:
+
+The example fixture grants `skyler@example.com` as the bootstrap editor.
+Replace that email before applying if another External Principal should mint a
+Git Credential and push.
+
+```sh
+export FINITE_SITES_API=https://api.finite.chat
+
+fsite project apply \
+  --json examples/project-applies/finitechat-native-mockup.json \
+  --dry-run \
+  --output json \
+  --config examples/finitechat-native-mockup/finite.toml
+
+fsite project apply \
+  --json examples/project-applies/finitechat-native-mockup.json \
+  --output json \
+  --config examples/finitechat-native-mockup/finite.toml
+
+fsite email-login skyler@example.com
+fsite email-redeem skyler@example.com TOKEN_FROM_EMAIL
+fsite auth git finitechat-native --email skyler@example.com --output json
+```
+
+Use the returned Git Credential with standard git:
+
+```sh
+git clone https://git.finite.chat/finitechat-native.git /tmp/finitechat-native
+rsync -a --delete examples/finitechat-native-mockup/ /tmp/finitechat-native/
+cd /tmp/finitechat-native
+git add finite.toml index.html
+git commit -m "Seed finitechat native mockup"
+git push origin main
+```
+
+Verify the reset path by checking:
+
+```sh
+curl https://api.finite.chat/api/v1/healthz
+curl https://finitechat-native-mockup.finite.chat/
+curl https://finitechat-native-mockup.finite.chat/llms.txt
+```
+
+The generated `/llms.txt` should describe `fsite auth git`, cloning
+`https://git.finite.chat/finitechat-native.git`, editing committed source,
+and pushing the Deploy Branch.
+
 ## 6. Backups
 
 Add `/var/lib/finite-sites` to the offsite backup scope. Registry + blobs

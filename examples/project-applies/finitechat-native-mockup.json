@@ -1,0 +1,23 @@
+{
+  "config": {
+    "project": {
+      "slug": "finitechat-native"
+    },
+    "outputs": {
+      "mockup": {
+        "kind": "site",
+        "site_name": "finitechat-native-mockup",
+        "branch": "main",
+        "path": ".",
+        "spa": false
+      }
+    }
+  },
+  "dry_run": false,
+  "collaborators": [
+    {
+      "email": "skyler@example.com",
+      "role": "editor"
+    }
+  ]
+}
