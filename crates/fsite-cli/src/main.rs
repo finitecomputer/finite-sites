@@ -63,7 +63,7 @@ fn run(args: &[String]) -> Result<(), CliError> {
         return Err(CliError::Usage(usage()));
     };
     match command.as_str() {
-        "whoami" => whoami(),
+        "whoami" => no_args_or_help(&args[1..], "fsite whoami", whoami_help(), whoami),
         "email-login" => email_login(&args[1..]),
         "email-redeem" => email_redeem(&args[1..]),
         "describe" => describe(&args[1..]),
@@ -73,7 +73,7 @@ fn run(args: &[String]) -> Result<(), CliError> {
         "publish" => publish(&args[1..]),
         "publish-app" => publish_app(&args[1..]),
         "status" => status(&args[1..]),
-        "list" => list(),
+        "list" => no_args_or_help(&args[1..], "fsite list", list_help(), list),
         "share" => share(&args[1..]),
         "editors" => editors(&args[1..]),
         "source" => source_command(&args[1..]),
@@ -86,6 +86,34 @@ fn run(args: &[String]) -> Result<(), CliError> {
             usage()
         ))),
     }
+}
+
+fn is_help_arg(arg: &str) -> bool {
+    arg == "--help" || arg == "-h" || arg == "help"
+}
+
+fn help_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| is_help_arg(arg))
+}
+
+fn print_help(text: &str) -> Result<(), CliError> {
+    println!("{text}");
+    Ok(())
+}
+
+fn no_args_or_help(
+    args: &[String],
+    command: &str,
+    help: &str,
+    action: fn() -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(help);
+    }
+    if !args.is_empty() {
+        return Err(CliError::Usage(format!("usage: {command}")));
+    }
+    action()
 }
 
 fn usage() -> String {
@@ -103,7 +131,78 @@ fn usage() -> String {
         .to_string()
 }
 
+fn whoami_help() -> &'static str {
+    "usage: fsite whoami\n\nPrint the local User Key npub and key file path. Creates the identity if missing."
+}
+
+fn email_login_help() -> &'static str {
+    "usage: fsite email-login EMAIL\n\nRequest a one-time email verification token for an External Principal."
+}
+
+fn email_redeem_help() -> &'static str {
+    "usage: fsite email-redeem EMAIL TOKEN\n\nVerify this machine's Email Key for an External Principal."
+}
+
+fn describe_help() -> &'static str {
+    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: project-config, initial-project-publish, edit-shared-project, grant-collaborator."
+}
+
+fn project_help() -> &'static str {
+    "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n\nCreate or update a Project Repository and finite.toml-described Project Outputs. See: fsite describe workflow project-config --output json"
+}
+
+fn project_apply_help() -> &'static str {
+    "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n\nReads Project apply JSON, validates it, optionally writes finite.toml, and creates/updates Project Outputs. Use --dry-run before mutating. Use --output json for agent workflows."
+}
+
+fn auth_help() -> &'static str {
+    "usage: fsite auth git PROJECT --email EMAIL [--output json]\n\nMint scoped HTTPS Git Credentials after email verification."
+}
+
+fn auth_git_help() -> &'static str {
+    "usage: fsite auth git PROJECT --email EMAIL [--output json]\n\nReturns git_remote_url, username, and password for standard git clone/push against one Project Repository."
+}
+
+fn claim_help() -> &'static str {
+    "usage: fsite claim NAME [--owner-email EMAIL]\n\nClaim a Finite Site name with the local User Key and create a workspace Site Key."
+}
+
+fn publish_help() -> &'static str {
+    "usage: fsite publish NAME PATH [--spa] [--source PATH] [--owner-email EMAIL] [--email EMAIL]\n\nLegacy site-first static publish. For Project Repositories prefer fsite project apply plus git push."
+}
+
+fn publish_app_help() -> &'static str {
+    "usage: fsite publish-app NAME PATH --start \"CMD\"\n\nPublish a tier-2 server app bundle. The start command must listen on $PORT."
+}
+
+fn status_help() -> &'static str {
+    "usage: fsite status NAME\n\nPrint registry status for one Finite Site."
+}
+
+fn list_help() -> &'static str {
+    "usage: fsite list\n\nList Finite Sites owned by the local User Key."
+}
+
+fn share_help() -> &'static str {
+    "usage: fsite share NAME [--shared|--private] [--public --yes-public] [--add-email EMAIL]... [--remove-email EMAIL]...\n\nChange output Visibility or email Share rows. Public sharing requires explicit human confirmation and --yes-public."
+}
+
+fn editors_help() -> &'static str {
+    "usage: fsite editors NAME [--email OWNER_EMAIL] [--add-email EMAIL]... [--remove-email EMAIL]...\n\nLegacy site-first editor management. Project Repository collaboration uses fsite project apply collaborators."
+}
+
+fn source_help() -> &'static str {
+    "usage: fsite source pull NAME PATH [--email EMAIL]\n\nPull a legacy Source Snapshot. Project-backed sites should use fsite auth git and git clone."
+}
+
+fn source_pull_help() -> &'static str {
+    "usage: fsite source pull NAME PATH [--email EMAIL]\n\nExtract the active Version's Source Snapshot into an empty target directory."
+}
+
 fn describe(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(describe_help());
+    }
     let mut positionals: Vec<&String> = Vec::new();
     let mut output_json = false;
     let mut index: usize = 0;
@@ -244,12 +343,10 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
 
 fn project_command(args: &[String]) -> Result<(), CliError> {
     let Some((subcommand, rest)) = args.split_first() else {
-        return Err(CliError::Usage(
-            "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]"
-                .to_string(),
-        ));
+        return Err(CliError::Usage(project_help().to_string()));
     };
     match subcommand.as_str() {
+        value if is_help_arg(value) => print_help(project_help()),
         "apply" => project_apply(rest),
         other => Err(CliError::Usage(format!(
             "unknown project command `{other}`"
@@ -258,6 +355,9 @@ fn project_command(args: &[String]) -> Result<(), CliError> {
 }
 
 fn project_apply(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(project_apply_help());
+    }
     let mut json_path: Option<String> = None;
     let mut dry_run = false;
     let mut output_json = false;
@@ -299,12 +399,7 @@ fn project_apply(args: &[String]) -> Result<(), CliError> {
             other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
         }
     }
-    let json_path = json_path.ok_or_else(|| {
-        CliError::Usage(
-            "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]"
-                .to_string(),
-        )
-    })?;
+    let json_path = json_path.ok_or_else(|| CliError::Usage(project_apply_help().to_string()))?;
     let mut request: ProjectApplyRequest = serde_json::from_slice(&read_json_input(&json_path)?)
         .map_err(|error| CliError::Usage(format!("invalid project apply json: {error}")))?;
     if dry_run {
@@ -392,17 +487,19 @@ fn write_project_config_file_if_missing(
 
 fn auth_command(args: &[String]) -> Result<(), CliError> {
     let Some((subcommand, rest)) = args.split_first() else {
-        return Err(CliError::Usage(
-            "usage: fsite auth git PROJECT --email EMAIL [--output json]".to_string(),
-        ));
+        return Err(CliError::Usage(auth_help().to_string()));
     };
     match subcommand.as_str() {
+        value if is_help_arg(value) => print_help(auth_help()),
         "git" => auth_git(rest),
         other => Err(CliError::Usage(format!("unknown auth command `{other}`"))),
     }
 }
 
 fn auth_git(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(auth_git_help());
+    }
     let mut positionals: Vec<&String> = Vec::new();
     let mut email: Option<String> = None;
     let mut output_json = false;
@@ -474,10 +571,11 @@ fn whoami() -> Result<(), CliError> {
 }
 
 fn email_login(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(email_login_help());
+    }
     let [email] = args else {
-        return Err(CliError::Usage(
-            "usage: fsite email-login EMAIL".to_string(),
-        ));
+        return Err(CliError::Usage(email_login_help().to_string()));
     };
     let client = api::Client::from_env();
     let response = client.request_email_login(email)?;
@@ -487,10 +585,11 @@ fn email_login(args: &[String]) -> Result<(), CliError> {
 }
 
 fn email_redeem(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(email_redeem_help());
+    }
     let [email, token] = args else {
-        return Err(CliError::Usage(
-            "usage: fsite email-redeem EMAIL TOKEN".to_string(),
-        ));
+        return Err(CliError::Usage(email_redeem_help().to_string()));
     };
     let key = keys::load_or_create_email_key(email)?;
     let client = api::Client::from_env();
@@ -500,6 +599,9 @@ fn email_redeem(args: &[String]) -> Result<(), CliError> {
 }
 
 fn claim(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(claim_help());
+    }
     let mut positionals: Vec<&String> = Vec::new();
     let mut owner_email: Option<String> = None;
     let mut index: usize = 0;
@@ -523,9 +625,7 @@ fn claim(args: &[String]) -> Result<(), CliError> {
         }
     }
     let [name] = positionals.as_slice() else {
-        return Err(CliError::Usage(
-            "usage: fsite claim NAME [--owner-email EMAIL]".to_string(),
-        ));
+        return Err(CliError::Usage(claim_help().to_string()));
     };
     let identity = keys::load_or_create_identity()?;
     let site_key = keys::load_or_create_site_key(name)?;
@@ -548,6 +648,9 @@ fn claim(args: &[String]) -> Result<(), CliError> {
 }
 
 fn publish(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(publish_help());
+    }
     let mut spa = false;
     let mut actor_email: Option<String> = None;
     let mut owner_email: Option<String> = None;
@@ -583,11 +686,7 @@ fn publish(args: &[String]) -> Result<(), CliError> {
         }
     }
     let [name, path] = positionals.as_slice() else {
-        return Err(CliError::Usage(
-            "usage: fsite publish NAME PATH [--spa] [--source PATH] \
-             [--owner-email EMAIL] [--email EMAIL]"
-                .to_string(),
-        ));
+        return Err(CliError::Usage(publish_help().to_string()));
     };
     if owner_email.is_some() && actor_email.is_some() {
         return Err(CliError::Usage(
@@ -691,6 +790,9 @@ fn ensure_claimed_with_owner_email(
 /// Tier 2: bundle a directory and publish it as a server app. The start
 /// command runs in the platform sandbox and must listen on `$PORT`.
 fn publish_app(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(publish_app_help());
+    }
     let mut positionals: Vec<&String> = Vec::new();
     let mut start: Option<String> = None;
     let mut index: usize = 0;
@@ -714,11 +816,7 @@ fn publish_app(args: &[String]) -> Result<(), CliError> {
         }
     }
     let ([name, path], Some(start)) = (positionals.as_slice(), start) else {
-        return Err(CliError::Usage(
-            "usage: fsite publish-app NAME PATH --start \"CMD\" \
-             (the command must listen on $PORT)"
-                .to_string(),
-        ));
+        return Err(CliError::Usage(publish_app_help().to_string()));
     };
 
     let site_key = keys::load_site_key(name)?;
@@ -757,8 +855,11 @@ fn publish_app(args: &[String]) -> Result<(), CliError> {
 }
 
 fn status(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(status_help());
+    }
     let [name] = args else {
-        return Err(CliError::Usage("usage: fsite status NAME".to_string()));
+        return Err(CliError::Usage(status_help().to_string()));
     };
     let key = actor_key_for(name)?;
     let client = api::Client::from_env();
@@ -790,12 +891,11 @@ fn list() -> Result<(), CliError> {
 }
 
 fn share(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(share_help());
+    }
     let Some((name, flags)) = args.split_first() else {
-        return Err(CliError::Usage(
-            "usage: fsite share NAME [--shared|--private] [--public --yes-public] \
-             [--add-email EMAIL]... [--remove-email EMAIL]..."
-                .to_string(),
-        ));
+        return Err(CliError::Usage(share_help().to_string()));
     };
 
     let mut visibility: Option<String> = None;
@@ -883,12 +983,11 @@ fn share(args: &[String]) -> Result<(), CliError> {
 }
 
 fn editors(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(editors_help());
+    }
     let Some((name, flags)) = args.split_first() else {
-        return Err(CliError::Usage(
-            "usage: fsite editors NAME [--email OWNER_EMAIL] \
-             [--add-email EMAIL]... [--remove-email EMAIL]..."
-                .to_string(),
-        ));
+        return Err(CliError::Usage(editors_help().to_string()));
     };
     let mut add_emails: Vec<String> = Vec::new();
     let mut remove_emails: Vec<String> = Vec::new();
@@ -955,17 +1054,19 @@ fn editors(args: &[String]) -> Result<(), CliError> {
 
 fn source_command(args: &[String]) -> Result<(), CliError> {
     let Some((subcommand, rest)) = args.split_first() else {
-        return Err(CliError::Usage(
-            "usage: fsite source pull NAME PATH [--email EMAIL]".to_string(),
-        ));
+        return Err(CliError::Usage(source_help().to_string()));
     };
     match subcommand.as_str() {
+        value if is_help_arg(value) => print_help(source_help()),
         "pull" => source_pull(rest),
         other => Err(CliError::Usage(format!("unknown source command `{other}`"))),
     }
 }
 
 fn source_pull(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(source_pull_help());
+    }
     let mut positionals: Vec<&String> = Vec::new();
     let mut actor_email: Option<String> = None;
     let mut index: usize = 0;
@@ -989,9 +1090,7 @@ fn source_pull(args: &[String]) -> Result<(), CliError> {
         }
     }
     let [name, target] = positionals.as_slice() else {
-        return Err(CliError::Usage(
-            "usage: fsite source pull NAME PATH [--email EMAIL]".to_string(),
-        ));
+        return Err(CliError::Usage(source_pull_help().to_string()));
     };
     let key = match actor_email.as_deref() {
         Some(email) => keys::load_or_create_email_key(email)?,
@@ -1035,5 +1134,53 @@ fn actor_key_for(name: &str) -> Result<keys::KeyFile, CliError> {
         keys::load_site_key(name)
     } else {
         keys::load_or_create_identity()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn help_is_read_only_for_agent_probe_paths() {
+        let commands = [
+            &["whoami", "--help"][..],
+            &["email-login", "--help"],
+            &["email-redeem", "--help"],
+            &["describe", "--help"],
+            &["project", "--help"],
+            &["project", "apply", "--help"],
+            &["auth", "--help"],
+            &["auth", "git", "--help"],
+            &["claim", "--help"],
+            &["publish", "--help"],
+            &["publish-app", "--help"],
+            &["status", "--help"],
+            &["list", "--help"],
+            &["share", "--help"],
+            &["editors", "--help"],
+            &["source", "--help"],
+            &["source", "pull", "--help"],
+        ];
+        // Bounded by the explicit command table above.
+        for command in commands {
+            run(&args(command)).unwrap();
+        }
+    }
+
+    #[test]
+    fn no_arg_commands_reject_extra_non_help_arguments() {
+        assert!(matches!(
+            run(&args(&["whoami", "extra"])),
+            Err(CliError::Usage(_))
+        ));
+        assert!(matches!(
+            run(&args(&["list", "extra"])),
+            Err(CliError::Usage(_))
+        ));
     }
 }
