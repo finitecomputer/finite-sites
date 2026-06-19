@@ -153,7 +153,7 @@ CREATE TABLE IF NOT EXISTS git_ref_events (
   error TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  UNIQUE (project_id, ref_name, new_sha)
+  UNIQUE (project_id, ref_name, old_sha, new_sha)
 );
 
 CREATE INDEX IF NOT EXISTS git_ref_events_pending
@@ -184,9 +184,13 @@ CREATE TABLE IF NOT EXISTS versions (
   total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
   spa_fallback INTEGER NOT NULL DEFAULT 0 CHECK (spa_fallback IN (0, 1)),
   start_command TEXT,
+  git_ref_event_id INTEGER,
   created_at INTEGER NOT NULL,
   UNIQUE (site_id, version_number)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS versions_git_ref_event
+  ON versions(git_ref_event_id) WHERE git_ref_event_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS version_files (
   version_id TEXT NOT NULL REFERENCES versions(id),

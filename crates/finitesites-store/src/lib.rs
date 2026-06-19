@@ -460,6 +460,12 @@ impl Store {
             "app_port INTEGER CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999))",
         )?;
         Self::ensure_column(&conn, "versions", "start_command", "start_command TEXT")?;
+        Self::ensure_column(
+            &conn,
+            "versions",
+            "git_ref_event_id",
+            "git_ref_event_id INTEGER",
+        )?;
         Self::ensure_column(&conn, "publishes", "start_command", "start_command TEXT")?;
         Self::ensure_column(
             &conn,
@@ -471,6 +477,11 @@ impl Store {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS sites_owner_email
              ON sites(owner_email) WHERE owner_email IS NOT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS versions_git_ref_event
+             ON versions(git_ref_event_id) WHERE git_ref_event_id IS NOT NULL",
             [],
         )?;
         Self::migrate_legacy_allowed_pubkeys(&conn)?;
@@ -1181,17 +1192,50 @@ impl Store {
                     actor_agent_key_id, git_credential_id, project_output_id,
                     status, version_id, error
              FROM git_ref_events
-             WHERE project_id = ?1 AND ref_name = ?2 AND new_sha = ?3",
-            params![project_id, ref_name, new_sha],
+             WHERE project_id = ?1 AND ref_name = ?2 AND old_sha = ?3 AND new_sha = ?4",
+            params![project_id, ref_name, old_sha, new_sha],
             Self::row_to_git_ref_event,
         )??;
-        if event.old_sha != old_sha {
-            return Err(StoreError::Conflict(
-                "git ref event replay has different old sha",
-            ));
-        }
         tx.commit()?;
         Ok((event, inserted > 0))
+    }
+
+    pub fn pending_git_ref_events(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<GitRefEventRecord>, StoreError> {
+        let (sql, params_box): (&str, Vec<String>) = match project_id {
+            Some(project_id) => (
+                "SELECT id, project_id, ref_name, old_sha, new_sha, actor_principal_id,
+                        actor_agent_key_id, git_credential_id, project_output_id,
+                        status, version_id, error
+                 FROM git_ref_events
+                 WHERE status = 'pending' AND project_id = ?1
+                 ORDER BY id",
+                vec![project_id.to_string()],
+            ),
+            None => (
+                "SELECT id, project_id, ref_name, old_sha, new_sha, actor_principal_id,
+                        actor_agent_key_id, git_credential_id, project_output_id,
+                        status, version_id, error
+                 FROM git_ref_events
+                 WHERE status = 'pending'
+                 ORDER BY id",
+                Vec::new(),
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if params_box.is_empty() {
+            stmt.query_map([], Self::row_to_git_ref_event)?
+        } else {
+            stmt.query_map(params![params_box[0]], Self::row_to_git_ref_event)?
+        };
+        let mut out = Vec::new();
+        // Bounded by the number of pending pushed refs in the registry.
+        for row in rows {
+            out.push(row??);
+        }
+        Ok(out)
     }
 
     pub fn mark_git_ref_event_deployed(
@@ -1596,6 +1640,24 @@ impl Store {
         Ok(Some(version))
     }
 
+    pub fn version_by_git_ref_event_id(
+        &self,
+        event_id: i64,
+    ) -> Result<Option<FinalizedVersion>, StoreError> {
+        let version_id = self
+            .conn
+            .query_row(
+                "SELECT id FROM versions WHERE git_ref_event_id = ?1",
+                params![event_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match version_id {
+            Some(version_id) => self.version_by_id(&version_id),
+            None => Ok(None),
+        }
+    }
+
     pub fn publish_source_by_hash(
         &self,
         publish_id: &str,
@@ -1714,6 +1776,20 @@ impl Store {
         manifest_sha256: &str,
         now: u64,
     ) -> Result<FinalizedVersion, StoreError> {
+        self.finalize_publish_for_git_event(publish_id, version_id, manifest_sha256, None, now)
+    }
+
+    /// Finalize with an optional git ref event id. The unique index on
+    /// `versions.git_ref_event_id` makes deploy replay deterministic after a
+    /// crash between Version creation and event acknowledgement.
+    pub fn finalize_publish_for_git_event(
+        &mut self,
+        publish_id: &str,
+        version_id: &str,
+        manifest_sha256: &str,
+        git_ref_event_id: Option<i64>,
+        now: u64,
+    ) -> Result<FinalizedVersion, StoreError> {
         assert!(manifest_sha256.len() == 64);
         let tx = self.conn.transaction()?;
 
@@ -1784,9 +1860,19 @@ impl Store {
         )?;
 
         tx.execute(
-            "INSERT INTO versions (id, site_id, version_number, manifest_sha256, path_count, total_bytes, spa_fallback, start_command, created_at)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, p.spa_fallback, p.start_command, ?7 FROM publishes p WHERE p.id = ?8",
-            params![version_id, site_id, version_number, manifest_sha256, path_count, total_bytes, now, publish_id],
+            "INSERT INTO versions (id, site_id, version_number, manifest_sha256, path_count, total_bytes, spa_fallback, start_command, git_ref_event_id, created_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, p.spa_fallback, p.start_command, ?7, ?8 FROM publishes p WHERE p.id = ?9",
+            params![
+                version_id,
+                site_id,
+                version_number,
+                manifest_sha256,
+                path_count,
+                total_bytes,
+                git_ref_event_id,
+                now,
+                publish_id
+            ],
         )?;
         // The first publish fixes the site kind; app sites get a loopback
         // port allocated once and keep it across versions.
@@ -2482,7 +2568,7 @@ mod tests {
     }
 
     #[test]
-    fn git_ref_events_are_idempotent_and_reject_conflicting_replay() {
+    fn git_ref_events_are_idempotent_per_ref_transition() {
         let mut store = Store::open_in_memory().unwrap();
         let applied = store
             .apply_project(
@@ -2538,22 +2624,20 @@ mod tests {
         assert!(!replay_inserted);
         assert_eq!(replay.id, event.id);
 
-        let conflicting = store.record_git_ref_event(
-            &applied.project.id,
-            "refs/heads/main",
-            "2222222222222222222222222222222222222222",
-            new_sha,
-            &applied.project.owner_principal_id,
-            None,
-            credential_id,
-            NOW + 4,
-        );
-        assert!(matches!(
-            conflicting,
-            Err(StoreError::Conflict(
-                "git ref event replay has different old sha"
-            ))
-        ));
+        let (next_transition, next_inserted) = store
+            .record_git_ref_event(
+                &applied.project.id,
+                "refs/heads/main",
+                "2222222222222222222222222222222222222222",
+                new_sha,
+                &applied.project.owner_principal_id,
+                None,
+                credential_id,
+                NOW + 4,
+            )
+            .unwrap();
+        assert!(next_inserted);
+        assert_ne!(next_transition.id, event.id);
     }
 
     #[test]

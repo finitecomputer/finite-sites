@@ -172,6 +172,7 @@ pub struct GitCredentialAuth {
     pub project_id: String,
     pub project_slug: String,
     pub principal_id: String,
+    pub actor_agent_key_id: Option<String>,
     pub git_credential_id: String,
     pub can_push: bool,
 }
@@ -459,6 +460,7 @@ impl Engine {
             project_id: project.id,
             project_slug: project.slug,
             principal_id: collaborator.principal_id,
+            actor_agent_key_id: None,
             git_credential_id: credential.id,
             can_push: collaborator.role != ProjectCollaboratorRole::Viewer,
         })
@@ -511,6 +513,13 @@ impl Engine {
         now: u64,
     ) -> Result<(), EngineError> {
         Ok(self.store.mark_git_ref_event_failed(event_id, error, now)?)
+    }
+
+    pub fn pending_git_ref_events(
+        &self,
+        project_id: Option<&str>,
+    ) -> Result<Vec<GitRefEventRecord>, EngineError> {
+        Ok(self.store.pending_git_ref_events(project_id)?)
     }
 
     // ---- claims ------------------------------------------------------------
@@ -926,10 +935,33 @@ impl Engine {
         spa_fallback: bool,
         now: u64,
     ) -> Result<FinalizeOutcome, EngineError> {
+        self.commit_project_output_version_for_git_event(site_id, None, files, spa_fallback, now)
+    }
+
+    pub fn commit_project_output_version_for_git_event(
+        &mut self,
+        site_id: &str,
+        git_ref_event_id: Option<i64>,
+        files: Vec<(ManifestFile, Vec<u8>)>,
+        spa_fallback: bool,
+        now: u64,
+    ) -> Result<FinalizeOutcome, EngineError> {
         let site = self
             .store
             .site_by_id(site_id)?
             .ok_or(EngineError::SiteNotFound)?;
+        if let Some(event_id) = git_ref_event_id
+            && let Some(version) = self.store.version_by_git_ref_event_id(event_id)?
+        {
+            return self.finalize_outcome(
+                &site.site_pubkey,
+                &version.version_id,
+                version.version_number,
+                version.path_count,
+                version.total_bytes,
+                version.source,
+            );
+        }
         if site.status == SiteStatus::Disabled || site.status == SiteStatus::Deleted {
             return Err(EngineError::Conflict("site is disabled"));
         }
@@ -975,17 +1007,19 @@ impl Engine {
         }
         let manifest_sha256 = manifest.digest();
         let version_id = ids::new_id(ids::VERSION_ID_PREFIX);
-        let finalized =
-            match self
-                .store
-                .finalize_publish(&publish_id, &version_id, &manifest_sha256, now)
-            {
-                Ok(finalized) => finalized,
-                Err(StoreError::Conflict("publish has missing blobs")) => {
-                    return Err(EngineError::Conflict("publish has missing blobs"));
-                }
-                Err(other) => return Err(other.into()),
-            };
+        let finalized = match self.store.finalize_publish_for_git_event(
+            &publish_id,
+            &version_id,
+            &manifest_sha256,
+            git_ref_event_id,
+            now,
+        ) {
+            Ok(finalized) => finalized,
+            Err(StoreError::Conflict("publish has missing blobs")) => {
+                return Err(EngineError::Conflict("publish has missing blobs"));
+            }
+            Err(other) => return Err(other.into()),
+        };
         self.finalize_outcome(
             &site.site_pubkey,
             &version_id,

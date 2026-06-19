@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -78,11 +78,18 @@ struct TestServer {
     agent: ureq::Agent,
     api_url: String,
     outbox: std::path::PathBuf,
-    _data_dir: tempfile::TempDir,
+    data_dir: tempfile::TempDir,
 }
 
 impl TestServer {
     async fn start(allowed_pubkey: &str) -> TestServer {
+        Self::start_with_git_auto_reconcile(allowed_pubkey, true).await
+    }
+
+    async fn start_with_git_auto_reconcile(
+        allowed_pubkey: &str,
+        git_auto_reconcile: bool,
+    ) -> TestServer {
         let data_dir = tempfile::tempdir().unwrap();
         let mut store = Store::open(&data_dir.path().join("registry.db")).unwrap();
         store
@@ -110,6 +117,8 @@ impl TestServer {
             base_domain: BASE_DOMAIN.to_string(),
             api_url: format!("http://127.0.0.1:{}", addr.port()),
             git_base_url: format!("http://git.{BASE_DOMAIN}:{}", addr.port()),
+            git_hook_helper_path: hook_helper_path(),
+            git_auto_reconcile,
             site_url_scheme: "http".to_string(),
             site_url_port: Some(addr.port()),
             mail_provider: None,
@@ -137,8 +146,12 @@ impl TestServer {
             agent: agent_for(addr),
             api_url,
             outbox,
-            _data_dir: data_dir,
+            data_dir,
         }
+    }
+
+    fn data_dir(&self) -> &Path {
+        self.data_dir.path()
     }
 
     fn signed(
@@ -169,6 +182,29 @@ impl TestServer {
     fn port(&self) -> u16 {
         self.api_url.rsplit_once(':').unwrap().1.parse().unwrap()
     }
+}
+
+fn hook_helper_path() -> PathBuf {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_finitesitesd") {
+        return PathBuf::from(path);
+    }
+    let current = std::env::current_exe().unwrap();
+    let debug_dir = current
+        .parent()
+        .and_then(Path::parent)
+        .expect("test binary lives under target/debug/deps");
+    let name = if cfg!(windows) {
+        "finitesitesd.exe"
+    } else {
+        "finitesitesd"
+    };
+    let candidate = debug_dir.join(name);
+    assert!(
+        candidate.exists(),
+        "finitesitesd hook helper binary missing at {}",
+        candidate.display()
+    );
+    candidate
 }
 
 fn json_body<T: serde::de::DeserializeOwned>(response: ureq::Response) -> T {
@@ -318,6 +354,32 @@ fn run_git_expect_failure(args: &[&str], cwd: Option<&Path>) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn wait_for_active_version(server: &TestServer, name: &str, expected: Option<u32>) -> SiteSummary {
+    let mut last: Option<SiteSummary> = None;
+    // Bounded wait: the receive-pack request has already completed; this only
+    // waits for the out-of-band reconciler spawned after that durable event.
+    for _ in 0..60 {
+        let summary: SiteSummary = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "GET",
+                    &format!("/api/v1/sites/{name}"),
+                    None,
+                )
+                .unwrap(),
+        );
+        if summary.active_version == expected {
+            return summary;
+        }
+        last = Some(summary);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let summary = last.expect("site summary was fetched at least once");
+    assert_eq!(summary.active_version, expected);
+    summary
 }
 
 fn project_apply_request(dry_run: bool) -> ProjectApplyRequest {
@@ -852,16 +914,7 @@ async fn git_http_clone_and_push_with_minted_credential() {
                 Some(&repo),
             );
 
-            let summary: SiteSummary = json_body(
-                server
-                    .signed(
-                        &user_secret(),
-                        "GET",
-                        "/api/v1/sites/finitechat-native-mockup",
-                        None,
-                    )
-                    .unwrap(),
-            );
+            let summary = wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
             assert_eq!(summary.active_version, Some(1));
 
             let llms = server
@@ -875,6 +928,158 @@ async fn git_http_clone_and_push_with_minted_credential() {
             ));
             assert!(llms.contains("git push origin main"));
         });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_ref_event_reconciles_after_restart_boundary() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start_with_git_auto_reconcile(&user_pubkey, false).await;
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let created: ProjectApplyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/apply",
+                    Some(&body),
+                )
+                .unwrap(),
+        );
+
+        let login_body = serde_json::to_vec(&EmailLoginRequest {
+            email: "skyler@example.com".into(),
+        })
+        .unwrap();
+        server
+            .agent
+            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+            .set("Content-Type", "application/json")
+            .send_bytes(&login_body)
+            .unwrap();
+        let token = outbox_email_token(&server.outbox);
+        clear_outbox(&server.outbox);
+        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
+            email: "skyler@example.com".into(),
+            token,
+        })
+        .unwrap();
+        server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/email-auth/redeem",
+                Some(&redeem_body),
+            )
+            .unwrap();
+
+        let auth_body = serde_json::to_vec(&GitAuthRequest {
+            email: "skyler@example.com".into(),
+        })
+        .unwrap();
+        let credential: GitAuthResponse = json_body(
+            server
+                .signed(
+                    &stranger_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/git-auth",
+                    Some(&auth_body),
+                )
+                .unwrap(),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let remote = format!(
+            "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+            credential.username,
+            credential.password,
+            server.port()
+        );
+        let host_header = format!("Host: git.{BASE_DOMAIN}:{}", server.port());
+        run_git(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "clone",
+                &remote,
+                "repo",
+            ],
+            Some(dir.path()),
+        );
+        let repo = dir.path().join("repo");
+        run_git(&["checkout", "-b", "main"], Some(&repo));
+        std::fs::write(repo.join("finite.toml"), created.finite_toml).unwrap();
+        std::fs::write(repo.join("index.html"), "<h1>after restart</h1>").unwrap();
+        run_git(&["add", "finite.toml", "index.html"], Some(&repo));
+        run_git(
+            &[
+                "-c",
+                "user.email=skyler@example.com",
+                "-c",
+                "user.name=Skyler Bot",
+                "commit",
+                "-m",
+                "Durable hook event",
+            ],
+            Some(&repo),
+        );
+        run_git(
+            &[
+                "-c",
+                &format!("http.extraHeader={host_header}"),
+                "push",
+                "origin",
+                "main",
+            ],
+            Some(&repo),
+        );
+
+        let summary: SiteSummary = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "GET",
+                    "/api/v1/sites/finitechat-native-mockup",
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(summary.active_version, None);
+
+        let data_dir = server.data_dir().to_path_buf();
+        {
+            let store = Store::open(&data_dir.join("registry.db")).unwrap();
+            let pending = store.pending_git_ref_events(None).unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].ref_name, "refs/heads/main");
+        }
+
+        let store = Store::open(&data_dir.join("registry.db")).unwrap();
+        let blobs = BlobStore::open(&data_dir.join("blobs")).unwrap();
+        let mut engine = Engine::new(
+            store,
+            blobs,
+            [9u8; 32],
+            EngineConfig {
+                base_domain: BASE_DOMAIN.to_string(),
+                site_url_scheme: "http".to_string(),
+                site_url_port: Some(server.port()),
+            },
+        );
+        let processed =
+            finitesitesd::git::reconcile_pending_events(&mut engine, &data_dir, None, now_unix())
+                .unwrap();
+        assert_eq!(processed, 1);
+        let replay =
+            finitesitesd::git::reconcile_pending_events(&mut engine, &data_dir, None, now_unix())
+                .unwrap();
+        assert_eq!(replay, 0);
+
+        let summary = wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+        assert_eq!(summary.active_version, Some(1));
+    });
     task.await.unwrap();
 }
 

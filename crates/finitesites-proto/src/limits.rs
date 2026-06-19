@@ -57,6 +57,15 @@ pub const MAX_API_BODY_BYTES: u64 = 2 * 1024 * 1024;
 /// daemon memory in the first implementation.
 pub const MAX_GIT_HTTP_BODY_BYTES: u64 = 128 * 1024 * 1024;
 
+/// One git push can update multiple refs, but Project Repository editing is
+/// branch-light. Bounding hook input keeps post-receive event recording
+/// visibly finite.
+pub const MAX_GIT_REF_UPDATES_PER_PUSH: u32 = 128;
+
+/// Git refs are stored in the registry audit table. This accepts ordinary
+/// branch/tag paths while rejecting unbounded strings from hook input.
+pub const MAX_GIT_REF_NAME_BYTES: u32 = 256;
+
 /// Sharing mutations may add or remove at most this many emails per request.
 pub const MAX_EMAILS_PER_SHARING_REQUEST: u32 = 20;
 

@@ -40,6 +40,8 @@ pub struct AppState {
     pub git_base_url: String,
     pub base_domain: String,
     pub data_dir: PathBuf,
+    pub git_hook_helper_path: PathBuf,
+    pub git_auto_reconcile: bool,
 }
 
 pub fn now_unix() -> u64 {
@@ -187,8 +189,11 @@ pub async fn serve_on(
         git_base_url: options.git_base_url.clone(),
         base_domain: options.base_domain.clone(),
         data_dir: options.data_dir.clone(),
+        git_hook_helper_path: options.git_hook_helper_path.clone(),
+        git_auto_reconcile: options.git_auto_reconcile,
     });
     reconcile_apps(&state);
+    reconcile_git_projects(&state);
     spawn_idle_reaper(state.clone());
     let app = build_app(state);
     eprintln!(
@@ -199,6 +204,20 @@ pub async fn serve_on(
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|error| format!("server error: {error}"))
+}
+
+fn reconcile_git_projects(state: &Arc<AppState>) {
+    if !state.git_auto_reconcile {
+        return;
+    }
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    match git::reconcile_pending_events(&mut engine, &state.data_dir, None, now_unix()) {
+        Ok(processed) if processed > 0 => {
+            eprintln!("git reconcile: {processed} pending event(s) processed");
+        }
+        Ok(_) => {}
+        Err(error) => eprintln!("git reconcile failed: {error}"),
+    }
 }
 
 /// Bring every app site with an active version back up after a daemon

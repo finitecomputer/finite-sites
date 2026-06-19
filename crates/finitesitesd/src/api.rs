@@ -319,7 +319,11 @@ async fn apply_project(
         })?;
     if !response.dry_run
         && let Some(project_id) = response.project_id.as_deref()
-        && let Err(error) = crate::git::ensure_bare_project_repo(&state.data_dir, project_id)
+        && let Err(error) = crate::git::ensure_bare_project_repo(
+            &state.data_dir,
+            project_id,
+            &state.git_hook_helper_path,
+        )
     {
         eprintln!("finitesitesd project repo setup failed: {error}");
         return Err(internal_error("git repository setup failure"));

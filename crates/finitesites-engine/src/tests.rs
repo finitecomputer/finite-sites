@@ -300,6 +300,103 @@ fn git_credential_requires_verified_project_collaborator() {
     );
 }
 
+#[test]
+fn project_output_version_replays_by_git_ref_event_id_after_ack_crash() {
+    let mut fx = fixture();
+    let created = fx
+        .engine
+        .apply_project(
+            OWNER,
+            &project_request(false),
+            "https://git.finite.chat/finitechat-native.git".to_string(),
+            NOW,
+        )
+        .unwrap();
+    let site_id = created.outputs[0].site_id.as_ref().unwrap().clone();
+    let project = fx
+        .engine
+        .store_mut()
+        .project_by_slug("finitechat-native")
+        .unwrap()
+        .unwrap();
+    let credential_id = "gcred_11111111111111111111111111111111";
+    fx.engine
+        .store_mut()
+        .create_git_credential(
+            credential_id,
+            &project.id,
+            &project.owner_principal_id,
+            &"a".repeat(64),
+            None,
+            NOW + 1,
+        )
+        .unwrap();
+    let (event, inserted) = fx
+        .engine
+        .store_mut()
+        .record_git_ref_event(
+            &project.id,
+            "refs/heads/main",
+            "0000000000000000000000000000000000000000",
+            "1111111111111111111111111111111111111111",
+            &project.owner_principal_id,
+            None,
+            credential_id,
+            NOW + 2,
+        )
+        .unwrap();
+    assert!(inserted);
+
+    let first_bytes: &[u8] = b"<h1>git version</h1>";
+    let first_file = ManifestFile {
+        path: "/index.html".to_string(),
+        sha256: sha(first_bytes),
+        size: first_bytes.len() as u64,
+    };
+    let first = fx
+        .engine
+        .commit_project_output_version_for_git_event(
+            &site_id,
+            Some(event.id),
+            vec![(first_file, first_bytes.to_vec())],
+            false,
+            NOW + 3,
+        )
+        .unwrap();
+    assert_eq!(first.version_number, 1);
+
+    let replay_bytes: &[u8] = b"<h1>must not become version two</h1>";
+    let replay_file = ManifestFile {
+        path: "/index.html".to_string(),
+        sha256: sha(replay_bytes),
+        size: replay_bytes.len() as u64,
+    };
+    let replay = fx
+        .engine
+        .commit_project_output_version_for_git_event(
+            &site_id,
+            Some(event.id),
+            vec![(replay_file, replay_bytes.to_vec())],
+            false,
+            NOW + 4,
+        )
+        .unwrap();
+    assert_eq!(replay.version_id, first.version_id);
+    assert_eq!(replay.version_number, 1);
+
+    let site = fx
+        .engine
+        .resolve_site("finitechat-native-mockup")
+        .unwrap()
+        .unwrap();
+    let found = fx
+        .engine
+        .lookup_file(&site, "/index.html")
+        .unwrap()
+        .unwrap();
+    assert_eq!(fx.engine.read_blob(&found.sha256).unwrap(), first_bytes);
+}
+
 // ---- publish ----------------------------------------------------------------
 
 #[test]

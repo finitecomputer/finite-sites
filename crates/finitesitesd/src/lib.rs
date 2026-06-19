@@ -6,6 +6,7 @@
 //!   disallow  revoke an operator publish grant
 //!   allowed   list active publishing grants
 //!   pre-user-reset  wipe product state during pre-user development
+//!   git-post-receive  internal hook helper for Project Repositories
 //!
 //! All subcommands take `--data DIR`; the registry database, blob store,
 //! cookie secret, and dev-mail outbox live under that directory.
@@ -37,6 +38,8 @@ pub struct ServeOptions {
     pub base_domain: String,
     pub api_url: String,
     pub git_base_url: String,
+    pub git_hook_helper_path: PathBuf,
+    pub git_auto_reconcile: bool,
     pub site_url_scheme: String,
     pub site_url_port: Option<u16>,
     /// `None` = dev mailer (outbox files). The API key for an HTTP provider
@@ -73,6 +76,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "disallow" => allowlist_mutate(&args[1..], false),
         "allowed" => allowlist_list(&args[1..]),
         "pre-user-reset" => pre_user_reset(&args[1..]),
+        "git-post-receive" => git_post_receive(),
         "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -85,13 +89,15 @@ fn usage() -> String {
     "usage:\n  finitesitesd serve --data DIR [--listen 127.0.0.1:8787] \
      [--base-domain sites.localhost] [--api-url http://127.0.0.1:8787] \
      [--git-url http://git.sites.localhost:8787] \
+     [--git-hook-helper PATH] [--git-auto-reconcile true|false] \
      [--site-scheme http] [--site-port PORT|none] \
      [--mailer dev|resend|postmark] [--mail-from ADDR] \
      [--app-runner none|systemd|kata] [--app-idle-timeout SECONDS]\n  \
      finitesitesd allow --data DIR PUBKEY_OR_NPUB [--note TEXT]\n  \
      finitesitesd disallow --data DIR PUBKEY_OR_NPUB\n  \
      finitesitesd allowed --data DIR\n  \
-     finitesitesd pre-user-reset --data DIR --confirm-wipe-product-data yes"
+     finitesitesd pre-user-reset --data DIR --confirm-wipe-product-data yes\n  \
+     finitesitesd git-post-receive"
         .to_string()
 }
 
@@ -177,6 +183,20 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
             format!("{site_url_scheme}://git.{base_domain}{port_part}")
         }
     };
+    let git_hook_helper_path = match flag_value(&flags, "git-hook-helper") {
+        Some(raw) => PathBuf::from(raw),
+        None => std::env::current_exe()
+            .map_err(|error| format!("cannot determine current executable: {error}"))?,
+    };
+    let git_auto_reconcile = match flag_value(&flags, "git-auto-reconcile") {
+        None | Some("true") => true,
+        Some("false") => false,
+        Some(other) => {
+            return Err(format!(
+                "unknown --git-auto-reconcile `{other}` (true|false)"
+            ));
+        }
+    };
     let mail_provider = match flag_value(&flags, "mailer") {
         None | Some("dev") => None,
         Some(raw) => Some(
@@ -212,6 +232,8 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         base_domain,
         api_url,
         git_base_url,
+        git_hook_helper_path,
+        git_auto_reconcile,
         site_url_scheme,
         site_url_port,
         mail_provider,
@@ -219,6 +241,10 @@ fn parse_serve_options(args: &[String]) -> Result<ServeOptions, String> {
         app_runner_kind,
         idle_timeout_seconds,
     })
+}
+
+fn git_post_receive() -> Result<(), String> {
+    crate::git::run_post_receive_hook_from_env()
 }
 
 fn open_store(data_dir: &Path) -> Result<Store, String> {
