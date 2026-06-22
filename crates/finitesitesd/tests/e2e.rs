@@ -9,24 +9,21 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
-
-use sha2::{Digest, Sha256};
 
 use finitesites_blob::BlobStore;
 use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::dto::{
-    ClaimRequest, ClaimResponse, EditorsRequest, EmailLoginRequest, EmailLoginResponse,
-    EmailRedeemRequest, EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectApplyRequest,
-    ProjectApplyResponse, ProjectCollaboratorRemoveRequest, ProjectCollaboratorRemoveResponse,
-    ProjectCollaboratorSpec, PublishBeginRequest, PublishBeginResponse, PublishFinalizeResponse,
-    SharingRequest, SharingResponse, SiteSummary, SourceSnapshotRequest,
+    EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest, EmailRedeemResponse, GitAuthRequest,
+    GitAuthResponse, ProjectApplyRequest, ProjectApplyResponse, ProjectCollaboratorRemoveRequest,
+    ProjectCollaboratorRemoveResponse, ProjectCollaboratorSpec, SharingRequest, SharingResponse,
+    SiteSummary,
 };
+use finitesites_proto::nip98;
 use finitesites_proto::project_config::{
     ProjectConfig, ProjectOutputConfig, ProjectOutputKind, ProjectSection,
 };
-use finitesites_proto::{ManifestFile, PublishManifest, hex, nip98};
 use finitesites_store::Store;
 use finitesitesd::mailer::DevMailer;
 use finitesitesd::{ServeOptions, server};
@@ -39,12 +36,6 @@ fn user_secret() -> [u8; 32] {
     secret
 }
 
-fn site_secret() -> [u8; 32] {
-    let mut secret = [0u8; 32];
-    secret[31] = 22;
-    secret
-}
-
 fn stranger_secret() -> [u8; 32] {
     let mut secret = [0u8; 32];
     secret[31] = 33;
@@ -53,10 +44,6 @@ fn stranger_secret() -> [u8; 32] {
 
 fn now_unix() -> u64 {
     time::OffsetDateTime::now_utc().unix_timestamp() as u64
-}
-
-fn sha(bytes: &[u8]) -> String {
-    hex::encode(&Sha256::digest(bytes))
 }
 
 /// ureq agent that resolves every hostname to the test server. This is what
@@ -237,92 +224,22 @@ fn outbox_email_token(outbox: &Path) -> String {
         .to_string()
 }
 
+fn outbox_bodies(outbox: &Path) -> Vec<String> {
+    let mut paths: Vec<_> = std::fs::read_dir(outbox)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .collect()
+}
+
 fn clear_outbox(outbox: &Path) {
     for entry in std::fs::read_dir(outbox).unwrap() {
         std::fs::remove_file(entry.unwrap().path()).unwrap();
     }
-}
-
-fn publish_static_version(
-    server: &TestServer,
-    secret: &[u8; 32],
-    name: &str,
-    files: Vec<(&str, &[u8])>,
-    source: Option<&[u8]>,
-) -> PublishFinalizeResponse {
-    let manifest = PublishManifest {
-        files: files
-            .iter()
-            .map(|(path, bytes)| ManifestFile {
-                path: (*path).to_string(),
-                sha256: sha(bytes),
-                size: bytes.len() as u64,
-            })
-            .collect(),
-    };
-    let source_request = source.map(|bytes| SourceSnapshotRequest {
-        sha256: sha(bytes),
-        size: bytes.len() as u64,
-    });
-    let begin_body = serde_json::to_vec(&PublishBeginRequest {
-        manifest,
-        spa: false,
-        start_command: None,
-        actor_email: None,
-        source: source_request,
-    })
-    .unwrap();
-    let begun: PublishBeginResponse = json_body(
-        server
-            .signed(
-                secret,
-                "POST",
-                &format!("/api/v1/sites/{name}/publish"),
-                Some(&begin_body),
-            )
-            .unwrap(),
-    );
-
-    // Bounded by the manifest size accepted by the server.
-    for (_, bytes) in &files {
-        server
-            .signed(
-                secret,
-                "PUT",
-                &format!(
-                    "/api/v1/publishes/{}/blobs/{}",
-                    begun.publish_id,
-                    sha(bytes)
-                ),
-                Some(*bytes),
-            )
-            .unwrap();
-    }
-    if let Some(bytes) = source {
-        server
-            .signed(
-                secret,
-                "PUT",
-                &format!(
-                    "/api/v1/publishes/{}/blobs/{}",
-                    begun.publish_id,
-                    sha(bytes)
-                ),
-                Some(bytes),
-            )
-            .unwrap();
-    }
-
-    json_body(
-        server
-            .signed(
-                secret,
-                "POST",
-                &format!("/api/v1/publishes/{}/finalize", begun.publish_id),
-                None,
-            )
-            .unwrap(),
-    )
 }
 
 fn run_git(args: &[&str], cwd: Option<&Path>) {
@@ -355,6 +272,16 @@ fn run_git_expect_failure(args: &[&str], cwd: Option<&Path>) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn try_git(args: &[&str], cwd: Option<&Path>) -> bool {
+    let mut command = Command::new("git");
+    command.args(args);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    command.status().unwrap().success()
 }
 
 fn wait_for_active_version(server: &TestServer, name: &str, expected: Option<u32>) -> SiteSummary {
@@ -410,6 +337,120 @@ fn project_apply_request(dry_run: bool) -> ProjectApplyRequest {
     }
 }
 
+fn mint_skyler_git_credential(server: &TestServer) -> GitAuthResponse {
+    let login_body = serde_json::to_vec(&EmailLoginRequest {
+        email: "skyler@example.com".into(),
+    })
+    .unwrap();
+    server
+        .agent
+        .post(&format!("{}/api/v1/email-auth/request", server.api_url))
+        .set("Content-Type", "application/json")
+        .send_bytes(&login_body)
+        .unwrap();
+    let token = outbox_email_token(&server.outbox);
+    clear_outbox(&server.outbox);
+
+    let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
+        email: "skyler@example.com".into(),
+        token,
+    })
+    .unwrap();
+    let redeemed: EmailRedeemResponse = json_body(
+        server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/email-auth/redeem",
+                Some(&redeem_body),
+            )
+            .unwrap(),
+    );
+    assert_eq!(redeemed.email, "skyler@example.com");
+
+    let auth_body = serde_json::to_vec(&GitAuthRequest {
+        email: "skyler@example.com".into(),
+    })
+    .unwrap();
+    json_body(
+        server
+            .signed(
+                &stranger_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/git-auth",
+                Some(&auth_body),
+            )
+            .unwrap(),
+    )
+}
+
+fn push_project_files(
+    server: &TestServer,
+    credential: &GitAuthResponse,
+    finite_toml: &str,
+    branch: &str,
+    files: &[(&str, &str)],
+    message: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = format!(
+        "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
+        credential.username,
+        credential.password,
+        server.port()
+    );
+    let host_header = format!("Host: git.{BASE_DOMAIN}:{}", server.port());
+    run_git(
+        &[
+            "-c",
+            &format!("http.extraHeader={host_header}"),
+            "clone",
+            &remote,
+            "repo",
+        ],
+        Some(dir.path()),
+    );
+    let repo = dir.path().join("repo");
+    if !try_git(&["checkout", branch], Some(&repo)) {
+        run_git(&["checkout", "-b", branch], Some(&repo));
+    }
+    std::fs::write(repo.join("finite.toml"), finite_toml).unwrap();
+    for (path, content) in files {
+        let target = repo.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(target, content).unwrap();
+    }
+    let mut add_args = vec!["add", "finite.toml"];
+    for (path, _) in files {
+        add_args.push(path);
+    }
+    run_git(&add_args, Some(&repo));
+    run_git(
+        &[
+            "-c",
+            "user.email=skyler@example.com",
+            "-c",
+            "user.name=Skyler Bot",
+            "commit",
+            "-m",
+            message,
+        ],
+        Some(&repo),
+    );
+    run_git(
+        &[
+            "-c",
+            &format!("http.extraHeader={host_header}"),
+            "push",
+            "origin",
+            branch,
+        ],
+        Some(&repo),
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn full_publish_share_and_view_flow() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
@@ -417,129 +458,64 @@ async fn full_publish_share_and_view_flow() {
     let port = server.port();
 
     let task = tokio::task::spawn_blocking(move || {
-        // Health check needs no auth.
         let health = server
             .agent
             .get(&format!("{}/api/v1/healthz", server.api_url))
             .call();
         assert!(health.is_ok());
 
-        // Claim with the user key, registering the site key.
-        let site_pubkey = finitesites_proto::event::pubkey_for_secret(&site_secret()).unwrap();
-        let claim_body = serde_json::to_vec(&ClaimRequest {
-            name: "hello".into(),
-            site_pubkey: site_pubkey.clone(),
-            owner_email: None,
-        })
-        .unwrap();
-        let claim: ClaimResponse = json_body(
+        let apply_body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let denied = server.signed(
+            &stranger_secret(),
+            "POST",
+            "/api/v1/projects/apply",
+            Some(&apply_body),
+        );
+        assert!(matches!(denied, Err(ureq::Error::Status(403, _))));
+
+        let no_auth = server
+            .agent
+            .post(&format!("{}/api/v1/projects/apply", server.api_url))
+            .set("Authorization", "Nostr bm90LWFuLWV2ZW50")
+            .send_bytes(&apply_body);
+        assert!(matches!(no_auth, Err(ureq::Error::Status(401, _))));
+
+        let created: ProjectApplyResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/sites/claim",
-                    Some(&claim_body),
+                    "/api/v1/projects/apply",
+                    Some(&apply_body),
                 )
                 .unwrap(),
         );
-        assert!(!claim.already_claimed);
-        assert_eq!(claim.url, format!("http://hello.{BASE_DOMAIN}:{port}/"));
-
-        // A key without a publish grant cannot claim.
-        let stranger_claim = serde_json::to_vec(&ClaimRequest {
-            name: "intruder".into(),
-            site_pubkey: "44".repeat(32),
-            owner_email: None,
-        })
-        .unwrap();
-        let denied = server.signed(
-            &stranger_secret(),
-            "POST",
-            "/api/v1/sites/claim",
-            Some(&stranger_claim),
-        );
-        assert!(matches!(denied, Err(ureq::Error::Status(403, _))));
-
-        // A garbage Authorization header is rejected.
-        let no_auth = server
-            .agent
-            .post(&format!("{}/api/v1/sites/claim", server.api_url))
-            .set("Authorization", "Nostr bm90LWFuLWV2ZW50")
-            .send_bytes(&claim_body);
-        assert!(matches!(no_auth, Err(ureq::Error::Status(401, _))));
-
-        // Unpublished site renders the placeholder.
-        let placeholder = server.site_get("hello", "/", port).unwrap();
+        let placeholder = server
+            .site_get("finitechat-native-mockup", "/", port)
+            .unwrap();
         assert!(placeholder.into_string().unwrap().contains("claimed"));
 
-        // Publish: begin, upload missing blobs, finalize.
-        let index_html: &[u8] = b"<h1>hello from finite</h1>";
-        let style_css: &[u8] = b"body { background: black }";
-        let manifest = PublishManifest {
-            files: vec![
-                ManifestFile {
-                    path: "/index.html".into(),
-                    sha256: sha(index_html),
-                    size: index_html.len() as u64,
-                },
-                ManifestFile {
-                    path: "/css/style.css".into(),
-                    sha256: sha(style_css),
-                    size: style_css.len() as u64,
-                },
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[
+                ("index.html", "<h1>hello from finite</h1>"),
+                ("css/style.css", "body { background: black }"),
             ],
-        };
-        let begin_body = serde_json::to_vec(&PublishBeginRequest {
-            manifest: manifest.clone(),
-            spa: false,
-            start_command: None,
-            actor_email: None,
-            source: None,
-        })
-        .unwrap();
-        let begun: PublishBeginResponse = json_body(
-            server
-                .signed(
-                    &site_secret(),
-                    "POST",
-                    "/api/v1/sites/hello/publish",
-                    Some(&begin_body),
-                )
-                .unwrap(),
+            "Initial deploy",
         );
-        assert_eq!(begun.missing.len(), 2);
+        let summary = wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+        assert_eq!(summary.active_version, Some(1));
 
-        for (blob, digest) in [(index_html, sha(index_html)), (style_css, sha(style_css))] {
-            server
-                .signed(
-                    &site_secret(),
-                    "PUT",
-                    &format!("/api/v1/publishes/{}/blobs/{digest}", begun.publish_id),
-                    Some(blob),
-                )
-                .unwrap();
-        }
-        let finalized: PublishFinalizeResponse = json_body(
-            server
-                .signed(
-                    &site_secret(),
-                    "POST",
-                    &format!("/api/v1/publishes/{}/finalize", begun.publish_id),
-                    None,
-                )
-                .unwrap(),
-        );
-        assert_eq!(finalized.version_number, 1);
-        assert_eq!(finalized.path_count, 2);
-
-        // Default visibility is private: viewing demands login.
-        let gated = server.site_get("hello", "/", port);
+        let gated = server.site_get("finitechat-native-mockup", "/", port);
         let Err(ureq::Error::Status(401, response)) = gated else {
             panic!("expected 401 for private site");
         };
         assert!(response.into_string().unwrap().contains("private"));
 
-        // Share with one email.
         let share_body = serde_json::to_vec(&SharingRequest {
             visibility: Some("shared".into()),
             confirm_public: false,
@@ -550,19 +526,16 @@ async fn full_publish_share_and_view_flow() {
         let shared: SharingResponse = json_body(
             server
                 .signed(
-                    &site_secret(),
+                    &user_secret(),
                     "POST",
-                    "/api/v1/sites/hello/sharing",
+                    "/api/v1/sites/finitechat-native-mockup/sharing",
                     Some(&share_body),
                 )
                 .unwrap(),
         );
         assert_eq!(shared.shared_emails, vec!["friend@example.com"]);
 
-        // Request a magic link as the shared email; the dev mailer drops it
-        // in the outbox. An unshared email gets the same generic page and
-        // no mail.
-        let site_base = format!("http://hello.{BASE_DOMAIN}:{port}");
+        let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
         let generic = server
             .agent
             .post(&format!("{site_base}/_finite/request-link"))
@@ -579,7 +552,6 @@ async fn full_publish_share_and_view_flow() {
         let link = outbox_link(&server.outbox);
         assert!(link.starts_with(&format!("{site_base}/_finite/auth?token=")));
 
-        // Redeem the link: cookie set, redirect home.
         let redeemed = server.agent.get(&link).call().unwrap();
         assert_eq!(redeemed.status(), 303);
         let cookie = redeemed
@@ -590,13 +562,9 @@ async fn full_publish_share_and_view_flow() {
             .unwrap()
             .to_string();
 
-        // The link is single-use.
         let replayed = server.agent.get(&link).call();
         assert!(matches!(replayed, Err(ureq::Error::Status(400, _))));
 
-        // Per-email rate limit: 3 links per window. One was already sent;
-        // two more go through, the fourth renders the same generic page
-        // but sends nothing.
         for _ in 0..3 {
             server
                 .agent
@@ -610,7 +578,6 @@ async fn full_publish_share_and_view_flow() {
             "fourth request must not send a fourth mail"
         );
 
-        // With the cookie, content serves; folder fallback and 404 behave.
         let page = server
             .agent
             .get(&format!("{site_base}/"))
@@ -651,7 +618,6 @@ async fn full_publish_share_and_view_flow() {
             .call();
         assert!(matches!(missing, Err(ureq::Error::Status(404, _))));
 
-        // Make it public (with confirmation): no cookie needed anymore.
         let public_body = serde_json::to_vec(&SharingRequest {
             visibility: Some("public".into()),
             confirm_public: true,
@@ -661,16 +627,17 @@ async fn full_publish_share_and_view_flow() {
         .unwrap();
         server
             .signed(
-                &site_secret(),
+                &user_secret(),
                 "POST",
-                "/api/v1/sites/hello/sharing",
+                "/api/v1/sites/finitechat-native-mockup/sharing",
                 Some(&public_body),
             )
             .unwrap();
-        let open = server.site_get("hello", "/", port).unwrap();
+        let open = server
+            .site_get("finitechat-native-mockup", "/", port)
+            .unwrap();
         assert_eq!(open.into_string().unwrap(), "<h1>hello from finite</h1>");
 
-        // Unknown subdomains render the unknown-site page.
         let unknown = server.site_get("ghost", "/", port);
         let Err(ureq::Error::Status(404, response)) = unknown else {
             panic!("expected 404 for unknown site");
@@ -681,6 +648,113 @@ async fn full_publish_share_and_view_flow() {
                 .unwrap()
                 .contains("No site lives here")
         );
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn share_send_invite_emails_viewer_magic_link_and_replays() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let created: ProjectApplyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/apply",
+                    Some(&body),
+                )
+                .unwrap(),
+        );
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>invite</h1>")],
+            "Invite test deploy",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+
+        let invalid_invite_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("private".into()),
+            confirm_public: false,
+            add_emails: vec!["Friend@Example.com".into()],
+            remove_emails: vec![],
+        })
+        .unwrap();
+        let invalid_invite = server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/sites/finitechat-native-mockup/sharing?send_invites=true",
+                Some(&invalid_invite_body),
+            )
+            .unwrap_err();
+        assert!(matches!(invalid_invite, ureq::Error::Status(400, _)));
+        let unchanged: SiteSummary = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "GET",
+                    "/api/v1/sites/finitechat-native-mockup",
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(unchanged.visibility, "private");
+        assert!(unchanged.shared_emails.is_empty());
+        assert!(outbox_bodies(&server.outbox).is_empty());
+
+        let share_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("shared".into()),
+            confirm_public: false,
+            add_emails: vec!["Friend@Example.com".into()],
+            remove_emails: vec![],
+        })
+        .unwrap();
+        let shared: SharingResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/sites/finitechat-native-mockup/sharing?send_invites=true",
+                    Some(&share_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(shared.shared_emails, vec!["friend@example.com"]);
+        assert_eq!(shared.invited_emails, vec!["friend@example.com"]);
+
+        let bodies = outbox_bodies(&server.outbox);
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].contains("You've been invited to view finitechat-native-mockup"));
+        assert!(bodies[0].contains("/llms.txt"));
+        let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
+        let link = outbox_link(&server.outbox);
+        assert!(link.starts_with(&format!("{site_base}/_finite/auth?token=")));
+        let redeemed = server.agent.get(&link).call().unwrap();
+        assert_eq!(redeemed.status(), 303);
+
+        clear_outbox(&server.outbox);
+        let replay: SharingResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/sites/finitechat-native-mockup/sharing?send_invites=true",
+                    Some(&share_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(replay.shared_emails, vec!["friend@example.com"]);
+        assert_eq!(replay.invited_emails, vec!["friend@example.com"]);
+        assert_eq!(outbox_bodies(&server.outbox).len(), 1);
     });
     task.await.unwrap();
 }
@@ -806,6 +880,60 @@ async fn project_apply_and_git_auth_flow() {
         assert_eq!(credential.username, credential.credential_id);
         assert_eq!(credential.password.len(), 64);
     });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn project_apply_send_invite_emails_collaborator_and_replays() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+
+    let task =
+        tokio::task::spawn_blocking(move || {
+            let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+            let created: ProjectApplyResponse = json_body(
+                server
+                    .signed(
+                        &user_secret(),
+                        "POST",
+                        "/api/v1/projects/apply?send_invites=true",
+                        Some(&body),
+                    )
+                    .unwrap(),
+            );
+            assert!(!created.dry_run);
+            assert!(created.created);
+            assert_eq!(created.collaborators.len(), 1);
+            assert_eq!(created.invited_emails, vec!["skyler@example.com"]);
+            let bodies = outbox_bodies(&server.outbox);
+            assert_eq!(bodies.len(), 1);
+            assert!(bodies[0].contains("You've been invited to collaborate on finitechat-native"));
+            assert!(bodies[0].contains("fsite email-redeem skyler@example.com"));
+            assert!(bodies[0].contains(
+                "fsite auth git finitechat-native --email skyler@example.com --output json"
+            ));
+            assert!(bodies[0].contains(&format!(
+                "git clone http://git.{BASE_DOMAIN}:{}/finitechat-native.git",
+                server.port()
+            )));
+            assert!(bodies[0].contains("finitechat-native-mockup"));
+
+            clear_outbox(&server.outbox);
+            let replay: ProjectApplyResponse = json_body(
+                server
+                    .signed(
+                        &user_secret(),
+                        "POST",
+                        "/api/v1/projects/apply?send_invites=true",
+                        Some(&body),
+                    )
+                    .unwrap(),
+            );
+            assert!(!replay.created);
+            assert_eq!(replay.collaborators.len(), 1);
+            assert_eq!(replay.invited_emails, vec!["skyler@example.com"]);
+            assert_eq!(outbox_bodies(&server.outbox).len(), 1);
+        });
     task.await.unwrap();
 }
 
@@ -1482,88 +1610,41 @@ async fn git_push_with_missing_output_path_does_not_publish() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn generated_llms_txt_requires_source_and_respects_user_file() {
+async fn generated_llms_txt_requires_project_output_and_respects_user_file() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
     let port = server.port();
 
     let task = tokio::task::spawn_blocking(move || {
-        let site_pubkey = finitesites_proto::event::pubkey_for_secret(&site_secret()).unwrap();
-        let claim_body = serde_json::to_vec(&ClaimRequest {
-            name: "agentdocs".into(),
-            site_pubkey,
-            owner_email: None,
-        })
-        .unwrap();
-        json_body::<ClaimResponse>(
+        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let created: ProjectApplyResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/sites/claim",
-                    Some(&claim_body),
+                    "/api/v1/projects/apply",
+                    Some(&body),
                 )
                 .unwrap(),
         );
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>v1</h1>")],
+            "Initial agent docs deploy",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
 
-        let editors_body = serde_json::to_vec(&EditorsRequest {
-            actor_email: None,
-            add_emails: vec!["skyler_bot@finite.vip".into()],
-            remove_emails: vec![],
-        })
-        .unwrap();
-        server
-            .signed(
-                &site_secret(),
-                "POST",
-                "/api/v1/sites/agentdocs/editors",
-                Some(&editors_body),
-            )
+        let generated = server
+            .site_get("finitechat-native-mockup", "/llms.txt", port)
+            .unwrap()
+            .into_string()
             .unwrap();
-
-        publish_static_version(
-            &server,
-            &site_secret(),
-            "agentdocs",
-            vec![("/index.html", b"<h1>v1</h1>")],
-            None,
-        );
-        let no_source = server.site_get("agentdocs", "/llms.txt", port);
-        assert!(matches!(no_source, Err(ureq::Error::Status(401, _))));
-
-        publish_static_version(
-            &server,
-            &site_secret(),
-            "agentdocs",
-            vec![("/index.html", b"<h1>v2</h1>")],
-            Some(b"source archive v2"),
-        );
-        let generated = server.site_get("agentdocs", "/llms.txt", port).unwrap();
-        assert_eq!(
-            generated.header("content-type").unwrap(),
-            "text/plain; charset=utf-8"
-        );
-        assert_eq!(generated.header("cache-control").unwrap(), "no-store");
-        let generated_body = generated.into_string().unwrap();
-        assert!(generated_body.contains("fsite source pull agentdocs ./site-source"));
-        assert!(generated_body.contains("https://github.com/finitecomputer/finite-sites"));
-        assert!(!generated_body.contains("skyler_bot@finite.vip"));
-
-        publish_static_version(
-            &server,
-            &site_secret(),
-            "agentdocs",
-            vec![
-                ("/index.html", b"<h1>v3</h1>"),
-                ("/llms.txt", b"custom project instructions"),
-            ],
-            Some(b"source archive v3"),
-        );
-        let private_user_file = server.site_get("agentdocs", "/llms.txt", port);
-        assert!(matches!(
-            private_user_file,
-            Err(ureq::Error::Status(401, _))
-        ));
+        assert!(generated.contains("Project: finitechat-native"));
+        assert!(generated.contains("fsite auth git finitechat-native"));
 
         let public_body = serde_json::to_vec(&SharingRequest {
             visibility: Some("public".into()),
@@ -1574,228 +1655,29 @@ async fn generated_llms_txt_requires_source_and_respects_user_file() {
         .unwrap();
         server
             .signed(
-                &site_secret(),
+                &user_secret(),
                 "POST",
-                "/api/v1/sites/agentdocs/sharing",
+                "/api/v1/sites/finitechat-native-mockup/sharing",
                 Some(&public_body),
             )
             .unwrap();
-        let custom = server.site_get("agentdocs", "/llms.txt", port).unwrap();
+
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[
+                ("index.html", "<h1>v2</h1>"),
+                ("llms.txt", "custom project instructions"),
+            ],
+            "Author llms instructions",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(2));
+        let custom = server
+            .site_get("finitechat-native-mockup", "/llms.txt", port)
+            .unwrap();
         assert_eq!(custom.into_string().unwrap(), "custom project instructions");
-    });
-    task.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn email_editor_publish_and_source_flow() {
-    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
-    let server = TestServer::start(&user_pubkey).await;
-    let port = server.port();
-
-    let task = tokio::task::spawn_blocking(move || {
-        let site_pubkey = finitesites_proto::event::pubkey_for_secret(&site_secret()).unwrap();
-        let claim_body = serde_json::to_vec(&ClaimRequest {
-            name: "collab".into(),
-            site_pubkey: site_pubkey.clone(),
-            owner_email: Some("paul@finite.vip".into()),
-        })
-        .unwrap();
-        let claim: ClaimResponse = json_body(
-            server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/sites/claim",
-                    Some(&claim_body),
-                )
-                .unwrap(),
-        );
-        assert_eq!(claim.owner_email.as_deref(), Some("paul@finite.vip"));
-
-        let owner_login_body = serde_json::to_vec(&EmailLoginRequest {
-            email: "paul@finite.vip".into(),
-        })
-        .unwrap();
-        json_body::<EmailLoginResponse>(
-            server
-                .agent
-                .post(&format!("{}/api/v1/email-auth/request", server.api_url))
-                .set("Content-Type", "application/json")
-                .send_bytes(&owner_login_body)
-                .unwrap(),
-        );
-        let owner_token = outbox_email_token(&server.outbox);
-        let owner_redeem_body = serde_json::to_vec(&EmailRedeemRequest {
-            email: "paul@finite.vip".into(),
-            token: owner_token,
-        })
-        .unwrap();
-        let owner_redeemed: EmailRedeemResponse = json_body(
-            server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/email-auth/redeem",
-                    Some(&owner_redeem_body),
-                )
-                .unwrap(),
-        );
-        assert_eq!(owner_redeemed.email, "paul@finite.vip");
-        clear_outbox(&server.outbox);
-
-        let login_body = serde_json::to_vec(&EmailLoginRequest {
-            email: "skyler_bot@finite.vip".into(),
-        })
-        .unwrap();
-        let login: EmailLoginResponse = json_body(
-            server
-                .agent
-                .post(&format!("{}/api/v1/email-auth/request", server.api_url))
-                .set("Content-Type", "application/json")
-                .send_bytes(&login_body)
-                .unwrap(),
-        );
-        assert_eq!(login.email, "skyler_bot@finite.vip");
-        let token = outbox_email_token(&server.outbox);
-
-        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
-            email: "skyler_bot@finite.vip".into(),
-            token,
-        })
-        .unwrap();
-        let redeemed: EmailRedeemResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    "/api/v1/email-auth/redeem",
-                    Some(&redeem_body),
-                )
-                .unwrap(),
-        );
-        assert_eq!(redeemed.email, "skyler_bot@finite.vip");
-
-        let editors_body = serde_json::to_vec(&EditorsRequest {
-            actor_email: Some("paul@finite.vip".into()),
-            add_emails: vec!["skyler_bot@finite.vip".into()],
-            remove_emails: vec![],
-        })
-        .unwrap();
-        server
-            .signed(
-                &user_secret(),
-                "POST",
-                "/api/v1/sites/collab/editors",
-                Some(&editors_body),
-            )
-            .unwrap();
-
-        let index_html: &[u8] = b"<h1>edited</h1>";
-        let source_bytes: &[u8] = b"pretend source archive";
-        let manifest = PublishManifest {
-            files: vec![ManifestFile {
-                path: "/index.html".into(),
-                sha256: sha(index_html),
-                size: index_html.len() as u64,
-            }],
-        };
-        let source = SourceSnapshotRequest {
-            sha256: sha(source_bytes),
-            size: source_bytes.len() as u64,
-        };
-        let begin_body = serde_json::to_vec(&PublishBeginRequest {
-            manifest,
-            spa: false,
-            start_command: None,
-            actor_email: Some("skyler_bot@finite.vip".into()),
-            source: Some(source.clone()),
-        })
-        .unwrap();
-        let begun: PublishBeginResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    "/api/v1/sites/collab/publish",
-                    Some(&begin_body),
-                )
-                .unwrap(),
-        );
-        assert_eq!(begun.missing, vec![sha(index_html), sha(source_bytes)]);
-        for (blob, digest) in [
-            (index_html, sha(index_html)),
-            (source_bytes, sha(source_bytes)),
-        ] {
-            server
-                .signed(
-                    &stranger_secret(),
-                    "PUT",
-                    &format!("/api/v1/publishes/{}/blobs/{digest}", begun.publish_id),
-                    Some(blob),
-                )
-                .unwrap();
-        }
-        let finalized: PublishFinalizeResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    &format!("/api/v1/publishes/{}/finalize", begun.publish_id),
-                    None,
-                )
-                .unwrap(),
-        );
-        assert_eq!(finalized.version_number, 1);
-        assert_eq!(
-            finalized
-                .source
-                .as_ref()
-                .map(|source| source.sha256.as_str()),
-            Some(source.sha256.as_str())
-        );
-
-        let source_response = server
-            .signed(
-                &stranger_secret(),
-                "GET",
-                "/api/v1/sites/collab/source?email=skyler_bot%40finite.vip",
-                None,
-            )
-            .unwrap();
-        assert_eq!(source_response.status(), 200);
-        assert_eq!(
-            source_response.header("x-finite-source-version").unwrap(),
-            "1"
-        );
-        assert_eq!(
-            source_response.into_string().unwrap().as_bytes(),
-            source_bytes
-        );
-
-        let remove_body = serde_json::to_vec(&EditorsRequest {
-            actor_email: None,
-            add_emails: vec![],
-            remove_emails: vec!["skyler_bot@finite.vip".into()],
-        })
-        .unwrap();
-        server
-            .signed(
-                &site_secret(),
-                "POST",
-                "/api/v1/sites/collab/editors",
-                Some(&remove_body),
-            )
-            .unwrap();
-        let denied = server.signed(
-            &stranger_secret(),
-            "POST",
-            "/api/v1/sites/collab/publish",
-            Some(&begin_body),
-        );
-        assert!(matches!(denied, Err(ureq::Error::Status(403, _))));
-
-        let open = server.site_get("collab", "/", port);
-        assert!(matches!(open, Err(ureq::Error::Status(401, _))));
     });
     task.await.unwrap();
 }

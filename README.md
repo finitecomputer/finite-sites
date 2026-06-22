@@ -1,42 +1,39 @@
 # Finite Sites
 
 Self-hosted site publishing for Finite Computer agents. A user says "make me
-a website"; their agent builds it, claims `name.finite.chat`, and publishes
-with nostr-key-signed requests. Sites are private by default, shareable with
-specific emails via magic links, or public — like sharing a Google Doc.
+a website"; their agent creates a Project Repository, commits deploy bytes,
+and pushes the Deploy Branch for `name.finite.chat`. Sites are private by
+default, shareable with specific emails via magic links, or public — like
+sharing a Google Doc.
 
 This replaces self-hosting sites from inside agent machines (see the
 AI Lounge postmortem in finitecomputer) and the nsite-based prototype in
-finite-site: the claim/version/registry model carries over, the serving
-substrate is now finite-owned storage behind one wildcard domain.
+finite-site: agents collaborate in git, while the serving substrate is
+finite-owned storage behind one wildcard domain.
 
 ## What works today (v1)
 
-- **Static sites**: manifest publish with content-addressed dedup, immutable
-  versions, atomic latest-pointer flips, ETag revalidation.
+- **Static sites**: Project Repository pushes produce content-addressed
+  immutable Versions with atomic latest-pointer flips and ETag revalidation.
 - **Nostr auth**: every registry mutation is a NIP-98-signed request. The
-  user identity key claims names; a per-site workspace-held key publishes.
-- **Email-keyed editors**: a site can have an owner email and additional
-  editor emails. Verified email keys can publish without exposing npubs.
-- **Source snapshots**: publishes can attach a bounded source `tar.gz` so a
-  later editor can pull source, change it, and republish with updated source.
+  user identity key owns Projects and output sharing.
 - **Project Repositories**: a Project is a git repo plus one or more
   `finite.toml` Project Outputs. Standard git clone/push works through
   `git-http-backend` behind Finite auth, and pushes to a Deploy Branch create
   immutable Versions from committed bytes.
-- **Agent handoff**: editable static sites with source get a generated
-  `/llms.txt` unless the user published that path themselves. Project-backed
-  sites get git-first instructions.
+- **Agent handoff**: project-backed editable outputs get a generated
+  `/llms.txt` unless the user published that path themselves. The generated
+  file gives agents git-first instructions.
 - **Publish grant cache**: only npubs with an active operator or Core grant can
-  claim/publish. The deployed allowlist commands manage operator grants;
-  payments/Core sync are the next source.
+  create Project Outputs and publish Versions. The deployed allowlist commands
+  manage operator grants; payments/Core sync are the next source.
 - **Sharing**: per-site visibility `private` / `shared` / `public`, email
   ACLs, magic-link login, host-scoped signed cookies. Revoking an email
   takes effect on the next request.
 - **Agent surface**: the `fsite` CLI hides nostr/keys/manifests entirely.
 
 Stateful sites (SQLite-backed apps) and full containers are tiers 2 and 3
-behind the same publish API — see `docs/roadmap.md`.
+behind the same Project Repository model — see `docs/roadmap.md`.
 
 ## Layout
 
@@ -44,8 +41,8 @@ behind the same publish API — see `docs/roadmap.md`.
 |---|---|
 | `finitesites-proto` | nostr events, NIP-98, manifests, names, limits, DTOs |
 | `finitesites-blob` | content-addressed blob storage (filesystem; Garage/S3 seam) |
-| `finitesites-store` | SQLite registry: publish grants, sites, claims, versions, shares, tokens |
-| `finitesites-engine` | all decisions: claim/publish/share/view/magic links |
+| `finitesites-store` | SQLite registry: publish grants, projects, outputs, versions, shares, tokens |
+| `finitesites-engine` | all decisions: project apply/git deploy/share/view/magic links |
 | `finitesitesd` | the server: control-plane API + wildcard site serving + grant ops |
 | `fsite-cli` | agent-facing CLI (`fsite`) |
 
@@ -80,14 +77,34 @@ export FINITE_SITES_API=http://127.0.0.1:8787
 cargo run -p fsite-cli --bin fsite -- whoami
 cargo run -p finitesitesd -- allow --data .dev-data <npub from whoami> --note me
 
-# 3. claim, publish, share
-cargo run -p fsite-cli --bin fsite -- claim hello
-cargo run -p fsite-cli --bin fsite -- publish hello examples/hello-site
-open http://hello.sites.localhost:8787/        # 401: private by default
-cargo run -p fsite-cli --bin fsite -- share hello --add-email you@example.com
+# 3. create a Project Repository and site output
+cargo run -p fsite-cli --bin fsite -- project apply \
+  --json examples/project-applies/finitechat-native-mockup.json \
+  --dry-run \
+  --output json \
+  --config examples/finitechat-native-mockup/finite.toml
+cargo run -p fsite-cli --bin fsite -- project apply \
+  --json examples/project-applies/finitechat-native-mockup.json \
+  --output json \
+  --config examples/finitechat-native-mockup/finite.toml
+
+# 4. verify the collaborator email, clone, commit deploy bytes, and push
+cargo run -p fsite-cli --bin fsite -- email-login skyler@example.com
+# copy TOKEN_FROM_EMAIL from .dev-data/outbox/*.txt
+cargo run -p fsite-cli --bin fsite -- email-redeem skyler@example.com TOKEN_FROM_EMAIL
+cargo run -p fsite-cli --bin fsite -- auth git finitechat-native --email skyler@example.com --output json
+git clone http://git.sites.localhost:8787/finitechat-native.git /tmp/finitechat-native
+rsync -a --delete examples/finitechat-native-mockup/ /tmp/finitechat-native/
+cd /tmp/finitechat-native
+git add finite.toml index.html
+git commit -m "Seed finitechat native mockup"
+git push origin main
+
+open http://finitechat-native-mockup.sites.localhost:8787/        # 401: private by default
+cargo run -p fsite-cli --bin fsite -- share finitechat-native-mockup --shared --add-email you@example.com --send-invite
 # request a link on the login page; the dev mailer writes it to
 # .dev-data/outbox/*.txt instead of sending real email
-cargo run -p fsite-cli --bin fsite -- share hello --public --yes-public
+cargo run -p fsite-cli --bin fsite -- share finitechat-native-mockup --public --yes-public
 ```
 
 `*.sites.localhost` resolves to loopback in modern browsers; for curl pass
@@ -115,7 +132,7 @@ the Project and its site output through agent-safe JSON:
 ```sh
 fsite describe workflow project-config --output json
 fsite project apply --json project.json --dry-run --output json
-fsite project apply --json project.json --output json
+fsite project apply --json project.json --send-invite --output json
 ```
 
 Minimal `finite.toml`:
@@ -160,36 +177,21 @@ should also lose view access to a site output, remove the Share row too:
 fsite share finitechat-native-mockup --remove-email editor@example.com
 ```
 
-Source Snapshot editing remains available for older site-first publishes.
-Owners can label a site with an owner email, publish source, and grant an
-editor:
-
-```sh
-fsite claim my-site --owner-email owner@example.com
-fsite publish my-site ./dist --source . --owner-email owner@example.com
-fsite editors my-site --add-email editor@example.com
-```
-
-An editor verifies their email once per machine, pulls the source snapshot,
-edits it, builds the artifact, and republishes with fresh source:
-
-```sh
-fsite email-login editor@example.com
-fsite email-redeem editor@example.com TOKEN_FROM_EMAIL
-fsite source pull my-site ./my-site-source --email editor@example.com
-cd ./my-site-source
-# edit, test, and build
-fsite publish my-site ./dist --source . --email editor@example.com
-```
-
-For editable static sites that have a source snapshot, Finite Sites serves a
-virtual `/llms.txt` with these instructions when the active version did not
-publish `/llms.txt` itself. That lets an owner send a site link to another
-person and have their agent discover the edit flow without scraping rendered
-HTML as source.
-
 Pushing to a Project Deploy Branch updates committed output bytes; Finite
 Sites does not run builds.
+
+Owners can also email a view invite for a Project Output. This is separate
+from Project Repository edit access:
+
+```sh
+fsite share finitechat-native-mockup --shared --add-email viewer@example.com --send-invite
+```
+
+For project-backed editable static sites, Finite Sites serves a virtual
+`/llms.txt` with git instructions when the active version did not publish
+`/llms.txt` itself. That lets an owner send a site link to another person and
+have their agent discover the edit flow without scraping rendered HTML as
+source.
 
 ## Agent-first CLI
 

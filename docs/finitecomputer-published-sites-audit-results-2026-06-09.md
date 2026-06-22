@@ -39,7 +39,7 @@ machine); home dirs live under `/var/lib/rancher/k3s/storage/`.
 
 `python3 -m http.server` 94 · `npx serve` ~27 · `vite preview`/`npm run preview` ~6
 · misc static 10. **A-class publishing is already overwhelmingly "point a dumb
-file server at a directory"** — exactly the `fsite publish` shape.
+file server at a directory"** — exactly the static Project Output shape.
 
 ### Runtime split within C/D (46 sites)
 

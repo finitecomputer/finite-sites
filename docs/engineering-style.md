@@ -20,8 +20,9 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   positive path and at least one negative/replay path.
 - Prefer explicit branch structure for validation. Avoid clever `Option` or
   iterator control flow where the code is enforcing safety properties.
-- Mutations that clients may retry (claim, upload, finalize) must be
-  idempotent or reject replays deterministically, and have tests for both.
+- Mutations that clients may retry (project apply, git ref reconciliation,
+  sharing updates) must be idempotent or reject replays deterministically,
+  and have tests for both.
 - Do not use recursion in protocol, storage, serving, or CLI walk code.
   Loops must be iterative and visibly bounded.
 - Put explicit limits on loops, batches, payloads, fanout, and manifests.
@@ -46,9 +47,9 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   choices, and security-relevant branches.
 - Pass important options explicitly at call sites instead of relying on
   library defaults.
-- Distinguish the control plane from the data plane. Claims, publishes,
-  sharing, and tokens are control plane; blob bytes and site serving are
-  data plane.
+- Distinguish the control plane from the data plane. Project apply, git
+  credential minting, git ref reconciliation, sharing, and tokens are control
+  plane; blob bytes and site serving are data plane.
 - Treat cache invalidation as a protocol decision. Any derived cache must
   name its source of truth, invalidation trigger, and stale-read behavior.
   (Today: ETags derive from blob hashes, which cannot go stale; viewer
@@ -67,20 +68,20 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
 
 Use handled errors for client mistakes and operating conditions:
 
-- name already claimed, name reserved or invalid;
+- output name already allocated, name reserved or invalid;
 - pubkey has no active publish grant;
 - manifest over limits, blob hash/size mismatch;
-- publish not pending, publish has missing blobs;
+- deploy has missing blobs;
 - login token unknown, used, or expired;
 - email not on the share list.
 
 Use assertions or corruption errors for internal contradictions:
 
-- a finalized publish without a version id;
-- version file rows that do not match the publish file rows they were
-  copied from;
+- a finalized deploy without a version id;
+- version file rows that do not match the deploy file rows they were copied
+  from;
 - a stored blob whose bytes no longer hash to its name;
-- a claimed site missing immediately after its insert;
+- an allocated output missing immediately after its insert;
 - a login token referencing a missing site.
 
 Assertion policy:
@@ -89,7 +90,7 @@ Assertion policy:
   near ingress for the assumptions being consumed, and one near egress for
   the state or value being produced.
 - Pair important assertions. Check data before writing it and again after
-  reading it back from storage (blob writes, key files, finalize).
+  reading it back from storage (blob writes, key files, version creation).
 - Split compound assertions so failures identify the exact broken invariant.
 - Pure decode/encode helpers may rely on type exhaustiveness instead of
   mechanical assertion count, but must reject impossible external values
@@ -99,10 +100,11 @@ Assertion policy:
 
 - Every registry mutation gets valid and invalid tests.
 - Every idempotent mutation gets success replay and conflicting-replay
-  tests (re-claim, re-upload, re-finalize).
+  tests (project apply replay, git ref event replay, sharing update replay).
 - Every storage invariant gets a restart test.
-- The full publish→share→login→view loop has an end-to-end HTTP test that
-  drives a real server the way the CLI and a browser would.
+- The full project apply→git push→share→login→view loop has an end-to-end
+  HTTP test that drives a real server the way the CLI, git, and a browser
+  would.
 - Add fuzz/property tests before changing manifest parsing, path decoding,
   or NIP-98 verification in ways that widen accepted inputs.
 
@@ -124,9 +126,10 @@ Initial sniff-test target for one finitesitesd process:
 - site request: one registry lookup by name, one version-file lookup, one
   blob read — no writes, no allocation proportional to site size beyond the
   blob itself;
-- publish finalize: one transaction touching publish, version, version
-  files, site pointer, and audit row;
-- claim: one transaction, decided by unique indexes, not check-then-insert.
+- git deploy version creation: one transaction touching publish staging,
+  version, version files, site pointer, and audit row;
+- project output allocation: one transaction, decided by unique indexes, not
+  check-then-insert.
 
 If a local dev server cannot handle hundreds of small site requests per
 second on a laptop, assume accidental complexity until proven otherwise.

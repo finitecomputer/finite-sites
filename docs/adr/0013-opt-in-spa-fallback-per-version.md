@@ -1,14 +1,14 @@
 # Opt-In SPA Fallback, Recorded Per Version
 
-A publish may be marked as a single-page app (`fsite publish NAME PATH
---spa`). On an SPA version, request paths that match no manifest file
+A Project Output may be marked as a single-page app with `spa = true` in
+`finite.toml`. On an SPA version, request paths that match no manifest file
 serve `/index.html` with status 200, so history-API client-side routers
-survive deep links and refreshes. SPA manifests must contain
+survive deep links and refreshes. SPA output snapshots must contain
 `/index.html`; non-SPA versions keep exact-match semantics with the
 site's `404.html`.
 
 The flag lives on the version, not the site: routing mode is a property
-of the published artifact, and republishing a non-SPA build must restore
+of the deployed artifact, and deploying a non-SPA build must restore
 404 semantics with the same pointer flip that activates it.
 
 **Considered Options**
@@ -21,4 +21,4 @@ of the published artifact, and republishing a non-SPA build must restore
   not the answer.
 - Site-level setting mutated like visibility: survives republishes that
   are no longer SPAs, leaving stale routing semantics.
-- Per-version opt-in flag at publish time: chosen.
+- Per-version opt-in flag from Project Output config: chosen.

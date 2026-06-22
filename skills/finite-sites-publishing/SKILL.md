@@ -40,10 +40,9 @@ human to send the npub to a Finite operator for allowlisting.
 `fsite` creates key files automatically:
 
 - identity: `~/.config/finite-sites/identity.env`
-- per-site: `.finite/sites/NAME.env` in the workspace
+- verified email identity: `~/.config/finite-sites/email.env`
 
-Never print, paste, move, commit, or deploy these files. Ensure `.finite/`
-is gitignored in any repo you touch.
+Never print, paste, move, commit, or deploy these files.
 
 ## Project Shape
 
@@ -113,42 +112,47 @@ Project Output, remove the Share row separately:
 fsite share SITE_NAME --remove-email editor@example.com
 ```
 
-## Source Snapshot Workflow
+## Initial Project Publish Workflow
 
-Use this for older site-first publishes or when Project Repositories are not
-available in the target environment.
+Use this flow for new sites and edits.
 
-1. Identify the requested `NAME`. Check what already exists when useful:
+1. Identify the Project slug and Site Name. Check what already exists when
+   useful:
 
 ```bash
 fsite list
 fsite status NAME
 ```
 
-2. Build and QA the site locally first. Publish only the final artifact
-   directory, never a project root (roots containing `.git`,
-   `node_modules`, or `.finite` are rejected).
-
-3. Claim and publish:
+2. Create or update `finite.toml` and project apply JSON. Learn the schema
+   from the CLI instead of guessing:
 
 ```bash
-fsite claim NAME
-fsite publish NAME ./dist --source .
+fsite describe workflow project-config --output json
+fsite project apply --json project.json --dry-run --output json
+fsite project apply --json project.json --output json
+```
+
+3. Clone the Project Repository, commit the source and deploy bytes selected
+   by `finite.toml`, and push the Deploy Branch:
+
+```bash
+fsite auth git PROJECT --email editor@example.com --output json
+git clone https://git.finite.chat/PROJECT.git
+cd PROJECT
+# edit source/data/logic, run tests/builds, commit deploy bytes
+git push origin main
 ```
 
 If the site is a single-page app with client-side routing (React Router,
-Vue Router, etc. using history-API URLs like `/settings`), add `--spa` so
-unknown paths serve the app shell instead of 404:
-
-```bash
-fsite publish NAME ./dist --spa --source .
-```
+Vue Router, etc. using history-API URLs like `/settings`), set `spa = true`
+on that Project Output in `finite.toml` so unknown paths serve the app shell
+instead of 404.
 
 Plain multi-page sites and hash-routed apps do not need `--spa`.
 
-Re-publishing the same name creates a new version; unchanged files upload
-nothing. Tell the human the URL when the publish succeeds, and that the
-site is currently private.
+Pushing the Deploy Branch creates a new Version. Tell the human the URL when
+the deploy succeeds, and that the site is currently private.
 
 4. Share it the way the human asked:
 
@@ -164,25 +168,9 @@ no account or password.
 
 ## Collaborative Editing
 
-For a site that should be editable by another person, attach an owner email
-and add editor emails:
-
-```bash
-fsite claim NAME --owner-email owner@example.com
-fsite publish NAME ./dist --source . --owner-email owner@example.com
-fsite editors NAME --add-email editor@example.com
-```
-
-When editing a site as an email-keyed editor:
-
-```bash
-fsite email-login editor@example.com
-fsite email-redeem editor@example.com TOKEN_FROM_EMAIL
-fsite source pull NAME ./site-source --email editor@example.com
-cd ./site-source
-# edit, test, and build
-fsite publish NAME ./dist --source . --email editor@example.com
-```
+Grant edit access as Project Collaborators in the project apply JSON. Editors
+verify email, mint a Git Credential, clone, commit, and push. Do not scrape
+rendered HTML as source and do not look for a source archive.
 
 If `https://NAME.finite.chat/llms.txt` exists and is platform-generated, use
 it as the handoff guide. If the project contains its own `llms.txt`, preserve
@@ -200,22 +188,10 @@ validation before mutation.
 
 ## Server Apps (tier 2)
 
-If the site needs a server (a database, API routes, server rendering),
-publish it as an app. The start command must listen on `$PORT`, and the
-app may only write files under `$DATA_DIR` (everything else is
-read-only):
-
-```bash
-fsite publish-app NAME ./bundle --start "node server.js"     # Next.js standalone
-fsite publish-app NAME ./appdir --start "uv run app.py"      # Python (PEP 723 inline deps)
-fsite publish-app NAME ./appdir --start "bun server.ts"      # Bun
-```
-
-For Next.js: set `output: "standalone"` in next.config, build, then
-bundle `.next/standalone` with `.next/static` copied into it (see
-examples/nextjs-demo). SQLite files belong in `$DATA_DIR`. Websockets
-are not supported yet. A site is either static or an app — the kind is
-fixed by its first publish.
+Server apps are not part of the current agent-facing publish surface. If the
+site needs a database, API routes, or server rendering, explain that Finite
+Sites currently accepts committed static Deploy Outputs and that app outputs
+need a future Project Output type.
 
 ## Public Warning
 

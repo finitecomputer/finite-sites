@@ -4,8 +4,8 @@
 //! sees names, paths, emails, and URLs:
 //!
 //!   fsite whoami
-//!   fsite claim NAME
-//!   fsite publish NAME PATH [--spa]
+//!   fsite project apply --json project.json --dry-run --output json
+//!   fsite auth git PROJECT --email EMAIL --output json
 //!   fsite status NAME
 //!   fsite list
 //!   fsite share NAME [--shared|--private] [--public --yes-public]
@@ -14,25 +14,20 @@
 //! Server address comes from FINITE_SITES_API (default https://api.finite.chat).
 
 mod api;
-mod bundle;
 mod keys;
-mod source;
-mod walk;
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use sha2::Digest as _;
 use thiserror::Error;
 
 use finitesites_proto::dto::{
-    EditorsRequest, GitAuthRequest, ProjectApplyRequest, ProjectCollaboratorRemoveRequest,
-    SharingRequest, SourceSnapshotRequest,
+    GitAuthRequest, ProjectApplyRequest, ProjectCollaboratorRemoveRequest, SharingRequest,
 };
 use finitesites_proto::limits::MAX_EMAILS_PER_SHARING_REQUEST;
+use finitesites_proto::npub;
 use finitesites_proto::project_config::parse_project_config_toml;
-use finitesites_proto::{hex, npub};
 
 #[derive(Debug, Error)]
 pub enum CliError {
@@ -44,6 +39,13 @@ pub enum CliError {
     Io(String),
     #[error("server error: {0}")]
     Api(String),
+    #[error("server error: {method} {path}: {status}: {message}")]
+    ApiStatus {
+        method: String,
+        path: String,
+        status: u16,
+        message: String,
+    },
     #[error("network error: {0}")]
     Http(String),
 }
@@ -70,14 +72,9 @@ fn run(args: &[String]) -> Result<(), CliError> {
         "describe" => describe(&args[1..]),
         "project" => project_command(&args[1..]),
         "auth" => auth_command(&args[1..]),
-        "claim" => claim(&args[1..]),
-        "publish" => publish(&args[1..]),
-        "publish-app" => publish_app(&args[1..]),
         "status" => status(&args[1..]),
         "list" => no_args_or_help(&args[1..], "fsite list", list_help(), list),
         "share" => share(&args[1..]),
-        "editors" => editors(&args[1..]),
-        "source" => source_command(&args[1..]),
         "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -119,17 +116,13 @@ fn no_args_or_help(
 
 fn usage() -> String {
     "usage:\n  fsite whoami\n  fsite email-login EMAIL\n  \
-     fsite email-redeem EMAIL TOKEN\n  fsite claim NAME [--owner-email EMAIL]\n  \
+     fsite email-redeem EMAIL TOKEN\n  \
      fsite describe [workflow NAME] [--output json]\n  \
-     fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n  \
+     fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n  \
      fsite project collaborator remove PROJECT --email EMAIL [--output json]\n  \
      fsite auth git PROJECT --email EMAIL [--output json]\n  \
-     fsite publish NAME PATH [--spa] [--source PATH] [--owner-email EMAIL] [--email EMAIL]\n  \
-     fsite publish-app NAME PATH --start \"CMD\"\n  \
      fsite status NAME\n  fsite list\n  fsite share NAME [--shared|--private] \
-     [--public --yes-public] [--add-email EMAIL]... [--remove-email EMAIL]...\n  \
-     fsite editors NAME [--email OWNER_EMAIL] [--add-email EMAIL]... [--remove-email EMAIL]...\n  \
-     fsite source pull NAME PATH [--email EMAIL]"
+     [--public --yes-public] [--send-invite] [--add-email EMAIL]... [--remove-email EMAIL]..."
         .to_string()
 }
 
@@ -150,11 +143,11 @@ fn describe_help() -> &'static str {
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n  fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nCreate/update Project Repositories and manage Project Collaborators. See: fsite describe workflow project-config --output json"
+    "usage:\n  fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n  fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nCreate/update Project Repositories and manage Project Collaborators. See: fsite describe workflow project-config --output json"
 }
 
 fn project_apply_help() -> &'static str {
-    "usage: fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]\n\nReads Project apply JSON, validates it, optionally writes finite.toml, and creates/updates Project Outputs. Use --dry-run before mutating. Use --output json for agent workflows."
+    "usage: fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n\nReads Project apply JSON, validates it, optionally writes finite.toml, and creates/updates Project Outputs. Use --send-invite to email Project Collaborators with fsite/git instructions. Use --dry-run before mutating. Use --output json for agent workflows."
 }
 
 fn project_collaborator_help() -> &'static str {
@@ -173,18 +166,6 @@ fn auth_git_help() -> &'static str {
     "usage: fsite auth git PROJECT --email EMAIL [--output json]\n\nReturns git_remote_url, username, and password for standard git clone/push against one Project Repository."
 }
 
-fn claim_help() -> &'static str {
-    "usage: fsite claim NAME [--owner-email EMAIL]\n\nClaim a Finite Site name with the local User Key and create a workspace Site Key."
-}
-
-fn publish_help() -> &'static str {
-    "usage: fsite publish NAME PATH [--spa] [--source PATH] [--owner-email EMAIL] [--email EMAIL]\n\nLegacy site-first static publish. For Project Repositories prefer fsite project apply plus git push."
-}
-
-fn publish_app_help() -> &'static str {
-    "usage: fsite publish-app NAME PATH --start \"CMD\"\n\nPublish a tier-2 server app bundle. The start command must listen on $PORT."
-}
-
 fn status_help() -> &'static str {
     "usage: fsite status NAME\n\nPrint registry status for one Finite Site."
 }
@@ -194,19 +175,7 @@ fn list_help() -> &'static str {
 }
 
 fn share_help() -> &'static str {
-    "usage: fsite share NAME [--shared|--private] [--public --yes-public] [--add-email EMAIL]... [--remove-email EMAIL]...\n\nChange output Visibility or email Share rows. Public sharing requires explicit human confirmation and --yes-public."
-}
-
-fn editors_help() -> &'static str {
-    "usage: fsite editors NAME [--email OWNER_EMAIL] [--add-email EMAIL]... [--remove-email EMAIL]...\n\nLegacy site-first editor management. Project Repository collaboration uses fsite project apply collaborators."
-}
-
-fn source_help() -> &'static str {
-    "usage: fsite source pull NAME PATH [--email EMAIL]\n\nPull a legacy Source Snapshot. Project-backed sites should use fsite auth git and git clone."
-}
-
-fn source_pull_help() -> &'static str {
-    "usage: fsite source pull NAME PATH [--email EMAIL]\n\nExtract the active Version's Source Snapshot into an empty target directory."
+    "usage: fsite share NAME [--shared|--private] [--public --yes-public] [--send-invite] [--add-email EMAIL]... [--remove-email EMAIL]...\n\nChange output Visibility or email Share rows. Use --send-invite with --add-email to email one-time viewer links. Public sharing requires explicit human confirmation and --yes-public."
 }
 
 fn describe(args: &[String]) -> Result<(), CliError> {
@@ -271,7 +240,12 @@ fn describe_commands() -> serde_json::Value {
             {
                 "name": "project apply",
                 "summary": "Create or update a Project Repository and finite.toml-described outputs.",
-                "usage": "fsite project apply --json FILE|- [--dry-run] [--output json] [--config finite.toml]"
+                "usage": "fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]"
+            },
+            {
+                "name": "share",
+                "summary": "Change Project Output visibility and email view shares.",
+                "usage": "fsite share NAME [--shared|--private] [--public --yes-public] [--send-invite] [--add-email EMAIL]... [--remove-email EMAIL]..."
             },
             {
                 "name": "project collaborator remove",
@@ -287,11 +261,6 @@ fn describe_commands() -> serde_json::Value {
                 "name": "describe workflow",
                 "summary": "Print machine-readable workflow guidance.",
                 "usage": "fsite describe workflow NAME --output json"
-            },
-            {
-                "name": "publish",
-                "summary": "Legacy site-first publish with optional source snapshot.",
-                "usage": "fsite publish NAME PATH [--spa] [--source PATH] [--email EMAIL]"
             }
         ],
         "workflows": [
@@ -324,7 +293,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
             "steps": [
                 "Create or build committed deploy bytes in the path selected by finite.toml.",
                 "Run fsite project apply --json project.json --dry-run --output json.",
-                "Run fsite project apply --json project.json --output json.",
+                "Run fsite project apply --json project.json --output json. Add --send-invite to email Project Collaborators after the real apply.",
                 "Commit finite.toml and deploy bytes to the Project Repository.",
                 "Push the Deploy Branch; Finite Sites validates committed bytes and creates a Version."
             ]
@@ -345,7 +314,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
                 "Add the collaborator email to the collaborators array in the project apply JSON.",
                 "Use role editor for agents that may push deploy bytes.",
                 "Run fsite project apply --json project.json --dry-run --output json.",
-                "Run fsite project apply --json project.json --output json after confirming the plan."
+                "Run fsite project apply --json project.json --send-invite --output json after confirming the plan."
             ]
         }),
         "remove-collaborator" => serde_json::json!({
@@ -472,6 +441,7 @@ fn project_apply(args: &[String]) -> Result<(), CliError> {
     }
     let mut json_path: Option<String> = None;
     let mut dry_run = false;
+    let mut send_invites = false;
     let mut output_json = false;
     let mut config_path = PathBuf::from("finite.toml");
     let mut index: usize = 0;
@@ -487,6 +457,10 @@ fn project_apply(args: &[String]) -> Result<(), CliError> {
             }
             "--dry-run" => {
                 dry_run = true;
+                index += 1;
+            }
+            "--send-invite" => {
+                send_invites = true;
                 index += 1;
             }
             "--output" => {
@@ -525,7 +499,7 @@ fn project_apply(args: &[String]) -> Result<(), CliError> {
 
     let identity = keys::load_or_create_identity()?;
     let client = api::Client::from_env();
-    let response = client.apply_project(&identity, &request)?;
+    let response = client.apply_project(&identity, &request, send_invites)?;
     if !response.dry_run {
         write_project_config_file_if_missing(&config_path, &request)?;
     }
@@ -543,8 +517,14 @@ fn project_apply(args: &[String]) -> Result<(), CliError> {
                 output.output_id, output.kind, output.site_url, output.path
             );
         }
+        if !response.invited_emails.is_empty() {
+            println!("invited: {}", response.invited_emails.join(", "));
+        }
         if response.dry_run {
             println!("dry-run: no server state changed and finite.toml was not written");
+            if send_invites {
+                println!("dry-run: no invite email was sent");
+            }
         }
     }
     Ok(())
@@ -678,7 +658,9 @@ fn whoami() -> Result<(), CliError> {
     println!("pubkey: {}", identity.pubkey);
     println!("file:   {}", keys::identity_path()?.display());
     println!();
-    println!("ask a finite operator to grant this npub publishing access before claiming sites");
+    println!(
+        "ask a finite operator to grant this npub publishing access before creating Project Outputs"
+    );
     Ok(())
 }
 
@@ -710,262 +692,6 @@ fn email_redeem(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn claim(args: &[String]) -> Result<(), CliError> {
-    if help_requested(args) {
-        return print_help(claim_help());
-    }
-    let mut positionals: Vec<&String> = Vec::new();
-    let mut owner_email: Option<String> = None;
-    let mut index: usize = 0;
-    // Bounded by argv length.
-    while index < args.len() {
-        match args[index].as_str() {
-            "--owner-email" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| CliError::Usage("--owner-email needs a value".to_string()))?;
-                owner_email = Some(value.clone());
-                index += 2;
-            }
-            other if other.starts_with("--") => {
-                return Err(CliError::Usage(format!("unknown flag `{other}`")));
-            }
-            _ => {
-                positionals.push(&args[index]);
-                index += 1;
-            }
-        }
-    }
-    let [name] = positionals.as_slice() else {
-        return Err(CliError::Usage(claim_help().to_string()));
-    };
-    let identity = keys::load_or_create_identity()?;
-    let site_key = keys::load_or_create_site_key(name)?;
-    let client = api::Client::from_env();
-    let response = client.claim(&identity, name, &site_key.pubkey, owner_email.as_deref())?;
-    if response.already_claimed {
-        println!("{} was already yours", response.name);
-    } else {
-        println!("claimed {}", response.name);
-    }
-    println!("url:    {}", response.url);
-    println!(
-        "status: {} (publish with: fsite publish {} PATH)",
-        response.status, response.name
-    );
-    if let Some(email) = response.owner_email {
-        println!("owner:  {email}");
-    }
-    Ok(())
-}
-
-fn publish(args: &[String]) -> Result<(), CliError> {
-    if help_requested(args) {
-        return print_help(publish_help());
-    }
-    let mut spa = false;
-    let mut actor_email: Option<String> = None;
-    let mut owner_email: Option<String> = None;
-    let mut source_path: Option<String> = None;
-    let mut positionals: Vec<&String> = Vec::new();
-    let mut index: usize = 0;
-    // Bounded by argv length.
-    while index < args.len() {
-        match args[index].as_str() {
-            "--spa" => {
-                spa = true;
-                index += 1;
-            }
-            "--email" | "--owner-email" | "--source" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| CliError::Usage(format!("{} needs a value", args[index])))?;
-                match args[index].as_str() {
-                    "--email" => actor_email = Some(value.clone()),
-                    "--owner-email" => owner_email = Some(value.clone()),
-                    "--source" => source_path = Some(value.clone()),
-                    _ => unreachable!(),
-                }
-                index += 2;
-            }
-            other if other.starts_with("--") => {
-                return Err(CliError::Usage(format!("unknown flag `{other}`")));
-            }
-            _ => {
-                positionals.push(&args[index]);
-                index += 1;
-            }
-        }
-    }
-    let [name, path] = positionals.as_slice() else {
-        return Err(CliError::Usage(publish_help().to_string()));
-    };
-    if owner_email.is_some() && actor_email.is_some() {
-        return Err(CliError::Usage(
-            "--owner-email requires the site key; do not combine it with --email".to_string(),
-        ));
-    }
-    let client = api::Client::from_env();
-    if let Some(email) = owner_email.as_deref() {
-        ensure_claimed_with_owner_email(&client, name, email)?;
-    }
-    let actor_key = match actor_email.as_deref() {
-        Some(email) => keys::load_or_create_email_key(email)?,
-        None => keys::load_site_key(name)?,
-    };
-    let outcome = walk::build_manifest(&PathBuf::from(path))?;
-    let source_bytes = match source_path.as_deref() {
-        Some(path) => {
-            eprintln!("building source snapshot from {path} ...");
-            Some(source::build_source_snapshot(&PathBuf::from(path))?)
-        }
-        None => None,
-    };
-    let source_request = source_bytes.as_ref().map(|bytes| SourceSnapshotRequest {
-        sha256: hex::encode(&sha2::Sha256::digest(bytes)),
-        size: bytes.len() as u64,
-    });
-    if outcome.skipped_hidden > 0 {
-        eprintln!(
-            "skipped {} hidden file(s)/folder(s)",
-            outcome.skipped_hidden
-        );
-    }
-
-    let begun = client.begin_publish(
-        &actor_key,
-        name,
-        &outcome.manifest,
-        spa,
-        actor_email.as_deref(),
-        source_request.as_ref(),
-    )?;
-    let total = outcome.manifest.files.len();
-    let to_upload = begun.missing.len();
-    eprintln!(
-        "{total} file(s) in manifest, {to_upload} new blob(s) to upload \
-         ({} already on the server)",
-        total - to_upload.min(total)
-    );
-
-    // Bounded by MAX_MANIFEST_FILES via manifest validation.
-    for (index, sha256) in begun.missing.iter().enumerate() {
-        if let (Some(request), Some(bytes)) = (source_request.as_ref(), source_bytes.as_ref())
-            && sha256 == &request.sha256
-        {
-            client.upload_blob(&actor_key, &begun.publish_id, sha256, bytes)?;
-            eprintln!("uploaded {}/{to_upload} source snapshot", index + 1);
-            continue;
-        }
-        let file_source = outcome
-            .sources
-            .get(sha256)
-            .ok_or_else(|| CliError::Api(format!("server asked for unknown blob {sha256}")))?;
-        let bytes = std::fs::read(file_source).map_err(|error| {
-            CliError::Io(format!("cannot read {}: {error}", file_source.display()))
-        })?;
-        client.upload_blob(&actor_key, &begun.publish_id, sha256, &bytes)?;
-        eprintln!(
-            "uploaded {}/{to_upload} {}",
-            index + 1,
-            file_source.display()
-        );
-    }
-
-    let finalized = client.finalize_publish(&actor_key, &begun.publish_id)?;
-    println!("published {name} version {}", finalized.version_number);
-    println!(
-        "{} file(s), {} bytes",
-        finalized.path_count, finalized.total_bytes
-    );
-    println!("url: {}", finalized.url);
-    if finalized.source.is_some() {
-        println!("source: attached");
-    }
-    println!();
-    println!("the site is PRIVATE by default; use `fsite share {name} ...` to share it");
-    Ok(())
-}
-
-fn ensure_claimed_with_owner_email(
-    client: &api::Client,
-    name: &str,
-    owner_email: &str,
-) -> Result<(), CliError> {
-    let identity = keys::load_or_create_identity()?;
-    let site_key = keys::load_or_create_site_key(name)?;
-    client.claim(&identity, name, &site_key.pubkey, Some(owner_email))?;
-    client.set_owner_email(&site_key, name, owner_email)?;
-    Ok(())
-}
-
-/// Tier 2: bundle a directory and publish it as a server app. The start
-/// command runs in the platform sandbox and must listen on `$PORT`.
-fn publish_app(args: &[String]) -> Result<(), CliError> {
-    if help_requested(args) {
-        return print_help(publish_app_help());
-    }
-    let mut positionals: Vec<&String> = Vec::new();
-    let mut start: Option<String> = None;
-    let mut index: usize = 0;
-    // Bounded by argv length.
-    while index < args.len() {
-        match args[index].as_str() {
-            "--start" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| CliError::Usage("--start needs a command".to_string()))?;
-                start = Some(value.clone());
-                index += 2;
-            }
-            other if other.starts_with("--") => {
-                return Err(CliError::Usage(format!("unknown flag `{other}`")));
-            }
-            _ => {
-                positionals.push(&args[index]);
-                index += 1;
-            }
-        }
-    }
-    let ([name, path], Some(start)) = (positionals.as_slice(), start) else {
-        return Err(CliError::Usage(publish_app_help().to_string()));
-    };
-
-    let site_key = keys::load_site_key(name)?;
-    eprintln!("bundling {path} ...");
-    let bundle_bytes = bundle::build_bundle(&PathBuf::from(path))?;
-    let sha256 = {
-        use sha2::Digest as _;
-        finitesites_proto::hex::encode(&sha2::Sha256::digest(&bundle_bytes))
-    };
-    let manifest = finitesites_proto::PublishManifest {
-        files: vec![finitesites_proto::ManifestFile {
-            path: finitesites_proto::manifest::APP_BUNDLE_PATH.to_string(),
-            sha256: sha256.clone(),
-            size: bundle_bytes.len() as u64,
-        }],
-    };
-
-    let client = api::Client::from_env();
-    let begun = client.begin_publish_app(&site_key, name, &manifest, &start)?;
-    if begun.missing.is_empty() {
-        eprintln!("bundle already on the server (unchanged)");
-    } else {
-        eprintln!(
-            "uploading bundle ({} MiB) ...",
-            bundle_bytes.len() / (1024 * 1024)
-        );
-        client.upload_blob(&site_key, &begun.publish_id, &sha256, &bundle_bytes)?;
-    }
-    let finalized = client.finalize_publish(&site_key, &begun.publish_id)?;
-    println!("published app {name} version {}", finalized.version_number);
-    println!("url: {}", finalized.url);
-    println!();
-    println!("the app is starting; it must listen on $PORT to serve");
-    println!("the site is PRIVATE by default; use `fsite share {name} ...` to share it");
-    Ok(())
-}
-
 fn status(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
         return print_help(status_help());
@@ -973,9 +699,9 @@ fn status(args: &[String]) -> Result<(), CliError> {
     let [name] = args else {
         return Err(CliError::Usage(status_help().to_string()));
     };
-    let key = actor_key_for(name)?;
+    let identity = keys::load_or_create_identity()?;
     let client = api::Client::from_env();
-    let summary = client.site_status(&key, name)?;
+    let summary = client.site_status(&identity, name)?;
     print_summary(&summary);
     Ok(())
 }
@@ -985,7 +711,9 @@ fn list() -> Result<(), CliError> {
     let client = api::Client::from_env();
     let response = client.list_sites(&identity)?;
     if response.sites.is_empty() {
-        println!("no sites yet; claim one with `fsite claim NAME`");
+        println!(
+            "no sites yet; create a Project Output with `fsite project apply --json project.json --dry-run --output json`"
+        );
         return Ok(());
     }
     // Bounded by MAX_SITES_PER_OWNER.
@@ -1012,6 +740,7 @@ fn share(args: &[String]) -> Result<(), CliError> {
 
     let mut visibility: Option<String> = None;
     let mut confirm_public = false;
+    let mut send_invites = false;
     let mut add_emails: Vec<String> = Vec::new();
     let mut remove_emails: Vec<String> = Vec::new();
     let mut index: usize = 0;
@@ -1032,6 +761,10 @@ fn share(args: &[String]) -> Result<(), CliError> {
             }
             "--yes-public" => {
                 confirm_public = true;
+                index += 1;
+            }
+            "--send-invite" => {
+                send_invites = true;
                 index += 1;
             }
             "--add-email" | "--remove-email" => {
@@ -1063,6 +796,11 @@ fn share(args: &[String]) -> Result<(), CliError> {
             "at most {MAX_EMAILS_PER_SHARING_REQUEST} email changes per command"
         )));
     }
+    if send_invites && add_emails.is_empty() {
+        return Err(CliError::Usage(
+            "--send-invite requires at least one --add-email".to_string(),
+        ));
+    }
     if visibility.is_none() && add_emails.is_empty() && remove_emails.is_empty() {
         return Err(CliError::Usage(
             "nothing to change; pass --shared/--private/--public and/or email flags".to_string(),
@@ -1072,146 +810,30 @@ fn share(args: &[String]) -> Result<(), CliError> {
     if visibility.is_none() && !add_emails.is_empty() {
         visibility = Some("shared".to_string());
     }
+    if send_invites && visibility.as_deref() != Some("shared") {
+        return Err(CliError::Usage(
+            "--send-invite requires shared visibility".to_string(),
+        ));
+    }
 
-    let key = actor_key_for(name)?;
     let client = api::Client::from_env();
-    let response = client.set_sharing(
-        &key,
-        name,
-        &SharingRequest {
-            visibility,
-            confirm_public,
-            add_emails,
-            remove_emails,
-        },
-    )?;
+    let request = SharingRequest {
+        visibility,
+        confirm_public,
+        add_emails,
+        remove_emails,
+    };
+    let identity = keys::load_or_create_identity()?;
+    let response = client.set_sharing(&identity, name, &request, send_invites)?;
     println!("visibility: {}", response.visibility);
     if response.shared_emails.is_empty() {
         println!("shared with: nobody");
     } else {
         println!("shared with: {}", response.shared_emails.join(", "));
     }
-    Ok(())
-}
-
-fn editors(args: &[String]) -> Result<(), CliError> {
-    if help_requested(args) {
-        return print_help(editors_help());
+    if !response.invited_emails.is_empty() {
+        println!("invited: {}", response.invited_emails.join(", "));
     }
-    let Some((name, flags)) = args.split_first() else {
-        return Err(CliError::Usage(editors_help().to_string()));
-    };
-    let mut add_emails: Vec<String> = Vec::new();
-    let mut remove_emails: Vec<String> = Vec::new();
-    let mut actor_email: Option<String> = None;
-    let mut index: usize = 0;
-    // Bounded by argv length.
-    while index < flags.len() {
-        match flags[index].as_str() {
-            "--email" => {
-                let value = flags
-                    .get(index + 1)
-                    .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
-                actor_email = Some(value.clone());
-                index += 2;
-            }
-            "--add-email" | "--remove-email" => {
-                let value = flags
-                    .get(index + 1)
-                    .ok_or_else(|| CliError::Usage(format!("{} needs a value", flags[index])))?;
-                if flags[index] == "--add-email" {
-                    add_emails.push(value.clone());
-                } else {
-                    remove_emails.push(value.clone());
-                }
-                index += 2;
-            }
-            other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
-        }
-    }
-    if add_emails.len() + remove_emails.len() > MAX_EMAILS_PER_SHARING_REQUEST as usize {
-        return Err(CliError::Usage(format!(
-            "at most {MAX_EMAILS_PER_SHARING_REQUEST} email changes per command"
-        )));
-    }
-    let key = match actor_email.as_deref() {
-        Some(email) => keys::load_or_create_email_key(email)?,
-        None => actor_key_for(name)?,
-    };
-    let client = api::Client::from_env();
-    let response = if add_emails.is_empty() && remove_emails.is_empty() {
-        client.list_editors(&key, name, actor_email.as_deref())?
-    } else {
-        client.update_editors(
-            &key,
-            name,
-            &EditorsRequest {
-                actor_email: actor_email.clone(),
-                add_emails,
-                remove_emails,
-            },
-        )?
-    };
-    match response.owner_email {
-        Some(email) => println!("owner:   {email}"),
-        None => println!("owner:   unset"),
-    }
-    if response.editor_emails.is_empty() {
-        println!("editors: nobody");
-    } else {
-        println!("editors: {}", response.editor_emails.join(", "));
-    }
-    Ok(())
-}
-
-fn source_command(args: &[String]) -> Result<(), CliError> {
-    let Some((subcommand, rest)) = args.split_first() else {
-        return Err(CliError::Usage(source_help().to_string()));
-    };
-    match subcommand.as_str() {
-        value if is_help_arg(value) => print_help(source_help()),
-        "pull" => source_pull(rest),
-        other => Err(CliError::Usage(format!("unknown source command `{other}`"))),
-    }
-}
-
-fn source_pull(args: &[String]) -> Result<(), CliError> {
-    if help_requested(args) {
-        return print_help(source_pull_help());
-    }
-    let mut positionals: Vec<&String> = Vec::new();
-    let mut actor_email: Option<String> = None;
-    let mut index: usize = 0;
-    // Bounded by argv length.
-    while index < args.len() {
-        match args[index].as_str() {
-            "--email" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
-                actor_email = Some(value.clone());
-                index += 2;
-            }
-            other if other.starts_with("--") => {
-                return Err(CliError::Usage(format!("unknown flag `{other}`")));
-            }
-            _ => {
-                positionals.push(&args[index]);
-                index += 1;
-            }
-        }
-    }
-    let [name, target] = positionals.as_slice() else {
-        return Err(CliError::Usage(source_pull_help().to_string()));
-    };
-    let key = match actor_email.as_deref() {
-        Some(email) => keys::load_or_create_email_key(email)?,
-        None => actor_key_for(name)?,
-    };
-    let client = api::Client::from_env();
-    let bytes = client.source_snapshot(&key, name, actor_email.as_deref())?;
-    source::extract_source_snapshot(&bytes, &PathBuf::from(target))?;
-    println!("pulled source for {name} into {target}");
     Ok(())
 }
 
@@ -1225,27 +847,8 @@ fn print_summary(summary: &finitesites_proto::dto::SiteSummary) {
         Some(version) => println!("version:    v{version}"),
         None => println!("version:    unpublished"),
     }
-    if let Some(email) = &summary.owner_email {
-        println!("owner:      {email}");
-    }
     if !summary.shared_emails.is_empty() {
         println!("shared:     {}", summary.shared_emails.join(", "));
-    }
-    if !summary.editor_emails.is_empty() {
-        println!("editors:    {}", summary.editor_emails.join(", "));
-    }
-    if let Some(source) = &summary.source {
-        println!("source:     v{} {}", source.version_number, source.sha256);
-    }
-}
-
-/// Prefer the site key (workspace-scoped) and fall back to the identity for
-/// commands that accept either signer.
-fn actor_key_for(name: &str) -> Result<keys::KeyFile, CliError> {
-    if keys::site_key_path(name).exists() {
-        keys::load_site_key(name)
-    } else {
-        keys::load_or_create_identity()
     }
 }
 
@@ -1270,20 +873,27 @@ mod tests {
             &["project", "collaborator", "remove", "--help"],
             &["auth", "--help"],
             &["auth", "git", "--help"],
-            &["claim", "--help"],
-            &["publish", "--help"],
-            &["publish-app", "--help"],
             &["status", "--help"],
             &["list", "--help"],
             &["share", "--help"],
-            &["editors", "--help"],
-            &["source", "--help"],
-            &["source", "pull", "--help"],
         ];
         // Bounded by the explicit command table above.
         for command in commands {
             run(&args(command)).unwrap();
         }
+    }
+
+    #[test]
+    fn top_level_usage_is_project_first() {
+        let text = usage();
+        assert!(text.contains("fsite project apply"));
+        assert!(text.contains("fsite auth git"));
+        assert!(text.contains("fsite share"));
+        assert!(!text.contains("fsite claim"));
+        assert!(!text.contains("fsite publish "));
+        assert!(!text.contains("fsite publish-app"));
+        assert!(!text.contains("fsite editors"));
+        assert!(!text.contains("fsite source"));
     }
 
     #[test]
@@ -1295,6 +905,25 @@ mod tests {
         assert!(matches!(
             run(&args(&["list", "extra"])),
             Err(CliError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn share_invite_requires_added_email_and_shared_visibility() {
+        assert!(matches!(
+            run(&args(&["share", "demo", "--send-invite"])),
+            Err(CliError::Usage(message)) if message.contains("--send-invite requires at least one --add-email")
+        ));
+        assert!(matches!(
+            run(&args(&[
+                "share",
+                "demo",
+                "--private",
+                "--send-invite",
+                "--add-email",
+                "friend@example.com"
+            ])),
+            Err(CliError::Usage(message)) if message.contains("--send-invite requires shared visibility")
         ));
     }
 

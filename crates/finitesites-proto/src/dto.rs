@@ -4,82 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::PublishManifest;
 use crate::project_config::ProjectConfig;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaimRequest {
-    pub name: String,
-    /// X-only pubkey hex of the per-site workspace-held signing key.
-    pub site_pubkey: String,
-    /// Optional human-facing owner email for email-keyed publishing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_email: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaimResponse {
-    pub site_id: String,
-    pub name: String,
-    pub url: String,
-    pub status: String,
-    /// True when this claim already existed for the same owner + site key.
-    pub already_claimed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_email: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceSnapshotRequest {
-    pub sha256: String,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceSnapshotInfo {
-    pub version_number: u32,
-    pub sha256: String,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishBeginRequest {
-    pub manifest: PublishManifest,
-    /// Single-page app: serve `/index.html` for unknown paths instead of a
-    /// 404, so client-side routers handle deep links. Defaults to false.
-    #[serde(default)]
-    pub spa: bool,
-    /// Tier 2 app publish: the shell command that starts the server (it
-    /// must listen on `$PORT`). When set, the manifest must contain exactly
-    /// one entry, the `/app.tar.gz` bundle. `None` means a static publish.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_command: Option<String>,
-    /// Email identity for email-keyed publishing. When omitted, the signer
-    /// must be the Site Key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor_email: Option<String>,
-    /// Optional source archive attached to the finalized version.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<SourceSnapshotRequest>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishBeginResponse {
-    pub publish_id: String,
-    /// Hashes the server does not have yet; upload exactly these.
-    pub missing: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishFinalizeResponse {
-    pub site_id: String,
-    pub version_number: u32,
-    pub url: String,
-    pub path_count: u32,
-    pub total_bytes: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<SourceSnapshotInfo>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmailLoginRequest {
@@ -104,29 +29,6 @@ pub struct EmailRedeemResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OwnerEmailRequest {
-    pub owner_email: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EditorsRequest {
-    /// Email identity for email-keyed owner actions. When omitted, the signer
-    /// must be the Owner User Key or Site Key.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor_email: Option<String>,
-    #[serde(default)]
-    pub add_emails: Vec<String>,
-    #[serde(default)]
-    pub remove_emails: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EditorsResponse {
-    pub owner_email: Option<String>,
-    pub editor_emails: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharingRequest {
     /// Target visibility: "private", "shared", or "public". Omit to keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +47,8 @@ pub struct SharingRequest {
 pub struct SharingResponse {
     pub visibility: String,
     pub shared_emails: Vec<String>,
+    #[serde(default)]
+    pub invited_emails: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,14 +61,8 @@ pub struct SiteSummary {
     /// "static" or "app". Defaulted for wire-compat with older peers.
     #[serde(default)]
     pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_email: Option<String>,
     pub active_version: Option<u32>,
     pub shared_emails: Vec<String>,
-    #[serde(default)]
-    pub editor_emails: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<SourceSnapshotInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +104,8 @@ pub struct ProjectApplyResponse {
     pub finite_toml: String,
     pub outputs: Vec<ProjectOutputSummary>,
     pub collaborators: Vec<ProjectCollaboratorSummary>,
+    #[serde(default)]
+    pub invited_emails: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

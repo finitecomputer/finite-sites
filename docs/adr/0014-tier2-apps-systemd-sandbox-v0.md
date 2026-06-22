@@ -1,7 +1,7 @@
 # Tier 2 v0: App Bundles In systemd Sandboxes
 
-A tier-2 app site is published as one `tar.gz` bundle plus a start
-command (`fsite publish-app NAME PATH --start "CMD"`). The platform
+A tier-2 app Project Output is deployed as one `tar.gz` bundle plus a start
+command in a typed runspec. The platform
 extracts the bundle into a read-only release directory, assigns the site
 a stable loopback port, and runs the command as a `finite-app@{site_id}`
 systemd template instance: DynamicUser, one writable StateDirectory
@@ -20,8 +20,8 @@ FastHTML are the reference examples.
 is kernel-level, not hardware-level. It is acceptable while every
 publisher has an active operator publish grant; it is not acceptable for hostile
 tenants. The upgrade path (roadmap) is moving the same bundle + runspec
-contract onto MicroSandbox/Kata microVMs without changing the publish
-surface. Tracked in the technical debt ledger.
+contract onto MicroSandbox/Kata microVMs without changing the Project Output
+model. Tracked in the technical debt ledger.
 
 **Considered Options**
 

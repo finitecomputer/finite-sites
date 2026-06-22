@@ -1,8 +1,9 @@
 # Roadmap
 
-v1 (this repo, shipped): static tier, NIP-98 auth, operator publish grants,
-sharing with magic links, local dev loop. This document sketches what comes
-next so v1 decisions stay compatible with it.
+v1 (this repo, shipped): Project Repositories, static Project Outputs,
+NIP-98 auth, operator publish grants, sharing with magic links, local dev
+loop. This document sketches what comes next so v1 decisions stay compatible
+with it.
 
 ## Production deploy (tier 1 on real metal)
 
@@ -26,8 +27,9 @@ A dedicated SaaS box, separate from user agent machines:
 
 ## Tier 2: stateful sites — SHIPPED, hardware-isolated (ADR-0014, ADR-0015)
 
-What shipped: `fsite publish-app NAME PATH --start "CMD"` — one tar.gz
-bundle, stable port, proxied behind the same visibility gate. Now runs in
+What exists in the runtime: one tar.gz bundle, stable port, proxied behind
+the same visibility gate. App output work must be Project-first before being
+advertised to agents. The runtime now runs in
 **Kata Containers microVMs** (Cloud Hypervisor), hardware-isolated, with a
 **wake-on-request Supervisor**: idle apps are stopped (RAM freed) and woken
 on the next request (~1.4s cold). Verified live on finite-lat-2 with
@@ -38,10 +40,10 @@ Firecracker snapshot tier for sub-second wake.
 
 The original sketch, kept for the microVM upgrade:
 
-- Claim/share/auth surfaces are unchanged.
-- A tier-2 publish uploads the app bundle the same way (manifest + blobs)
-  plus a small typed runspec (entrypoint, port). Never raw compose/YAML
-  from tenants — the control plane translates a constrained spec.
+- Project/share/auth surfaces are unchanged.
+- A tier-2 Project Output deploys an app bundle plus a small typed runspec
+  (entrypoint, port). Never raw compose/YAML from tenants — the control plane
+  translates a constrained spec.
 - Runtime: one container per app under gVisor (runsc), read-only rootfs
   materialized from the blob store, one writable volume for the SQLite
   file, CPU/mem/pids quotas, default-deny egress, sleep on idle / wake on
@@ -60,19 +62,19 @@ a rewrite.
   isolated microVM (~150–300ms starts).
 - Fly-Machines-style API in the control plane: create/start/stop/destroy,
   image from a registry, per-machine volumes.
-- Same auth (site key = machine key), same sharing gate in front of HTTP
+- Same Principal and Agent Delegation auth, same sharing gate in front of HTTP
   machines, same `fsite`-style CLI surface (`fsite machine ...`).
 
 ## Project Repository collaboration milestones
 
-ADR-0019 moves collaboration from site-first Source Snapshots to
-Project-first git. The milestones below keep the full product shape visible
-while letting the first implementation stay focused.
+ADR-0019 makes Project-first git the collaboration model. The milestones
+below keep the full product shape visible while letting the first
+implementation stay focused.
 
 ### Milestone 1: Project Git Spine
 
 - Pre-User Reset wipes product data so examples can be redeployed without
-  legacy adapters.
+  compatibility adapters.
 - Registry has final-shaped Principals, Agent Keys, Projects, Project
   Collaborators, Project Outputs, and Git Credentials.
 - `fsite project apply --json ... --dry-run --output json` creates a Project
@@ -108,9 +110,17 @@ while letting the first implementation stay focused.
 
 ### Milestone 3: Multi-output Projects
 
+- Registry and serving state are cut over so Project Output, not Site, owns
+  visibility, shares, active versions, and version history.
+- Output routing names are namespaced by output kind and serving domain, so a
+  site, document, and PDF can share the same label on different domains.
 - `finite.toml` supports multiple Project Outputs.
-- `site` remains the first output kind; document/PDF outputs follow once the
-  workflow is proven.
+- `site` remains the first output kind. Document v0 is a narrow Markdown
+  renderer output: a single Markdown file or folder of Markdown files selected
+  by `finite.toml`, served through the same Project Repository and sharing
+  flow.
+- PDF outputs use the same Project Repository and Project Output versioning
+  model once documents prove the path.
 - Project Visibility remains independent from output Visibility.
 - Output-level permissions exist only where they are truly needed.
 

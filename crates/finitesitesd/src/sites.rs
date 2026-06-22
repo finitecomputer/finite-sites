@@ -147,11 +147,13 @@ async fn serve_path(
                             &output.path,
                         ))
                     }
-                    Ok(None) => Some(crate::llms::generated_llms_txt(
-                        &site.name,
-                        &engine.site_url(&site.name),
-                        &state.api_url,
-                    )),
+                    Ok(None) => {
+                        eprintln!(
+                            "finitesitesd project llms.txt invariant failed: no project output for {}",
+                            site.id
+                        );
+                        return internal_page();
+                    }
                     Err(error) => {
                         eprintln!("finitesitesd project llms.txt error: {error}");
                         return internal_page();

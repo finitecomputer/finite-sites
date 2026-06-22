@@ -1,7 +1,7 @@
-# Tiered Hosting Behind One Publish API
+# Tiered Hosting Behind Project Outputs
 
-Finite Sites is designed as three isolation tiers behind the same claim /
-publish / share surface. v1 ships tier 1 only.
+Finite Sites is designed as three isolation tiers behind the same Project
+Repository, Project Output, and sharing surface. v1 ships tier 1 only.
 
 1. **Static** (shipped): manifest + blobs, zero per-site processes.
 2. **Stateful sites**: a normal app process (e.g. Bun + a SQLite file) run
@@ -22,5 +22,5 @@ platform-specific rewrite at any tier.
   rewritten as Workers + D1 and there is no real container story.
 - Machines-only (everything a microVM): uniform but wasteful for static
   sites, which are most of the volume.
-- Three tiers behind one API: each workload gets the cheapest sufficient
+- Three tiers behind one project model: each workload gets the cheapest sufficient
   isolation; chosen.

@@ -24,8 +24,8 @@ function Page({ title, children }: { title: string; children?: React.ReactNode }
       <h1 style={{ fontSize: "1.4rem" }}>{title}</h1>
       {children}
       <p style={{ color: "#9a9aa8", fontSize: "0.9rem", lineHeight: 1.5 }}>
-        React 19 + React Router 7, bundled with <code>bun build</code>, published
-        with <code>fsite publish --spa</code>. Refresh on any route.
+        React 19 + React Router 7, bundled with <code>bun build</code>, deployed
+        as a Project Output with <code>spa = true</code>. Refresh on any route.
       </p>
     </main>
   );

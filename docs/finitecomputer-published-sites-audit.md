@@ -73,8 +73,8 @@ Detection heuristics (adapt as needed):
 
 ## Classification (the headline numbers we need)
 
-- **A — static as-is**: served files only; would publish to tier 1 today
-  with `fsite publish`.
+- **A — static as-is**: served files only; would deploy to tier 1 today as
+  committed Project Output bytes.
 - **B — static after build**: a Vite/Next-export/etc. project currently
   served by a dev server or from source, where `build` produces a static
   artifact with no server code. Tier-1-able with one build step.

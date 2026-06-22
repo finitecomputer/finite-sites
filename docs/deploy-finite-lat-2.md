@@ -13,10 +13,37 @@ Unit, Caddyfile, and env example live in `deploy/finite-lat-2/`.
 `/etc/finite-saas/certs/finite-chat-origin.{pem,key}`, zone on Full
 strict), and outbound mail (finite.chat verified at Resend, unit running
 `--mailer resend` with the send-only key in `/etc/finite-saas/sites.env`)
-are all done. Validation gates passed: signed claim + publish from a
-remote machine through the proxy, public serving, API-host dispatch, a
-real magic link delivered through Resend, and restart durability. The
-only standing operational TODO is the backup scope (section 6).
+are all done. Validation gates passed: Project Repository apply, git auth,
+clone/push through the proxy, public serving, API-host dispatch, a real magic
+link delivered through Resend, and restart durability. The only standing
+operational TODO is the backup scope (section 6).
+
+## 0. Local operator SSH alias
+
+Operator machines should have an SSH config entry for the production box.
+Do this once per machine so rollout commands never depend on remembering the
+raw IP or login user:
+
+```sshconfig
+Host finite-lat-2
+  HostName 64.34.80.19
+  User ubuntu
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+```
+
+Before a rollout, verify the alias and principal:
+
+```sh
+ssh finite-lat-2 'hostname && whoami'
+```
+
+The expected output is:
+
+```text
+finite-lat-2
+ubuntu
+```
 
 ## 1. Cloudflare zone setup (one time)
 
@@ -170,7 +197,7 @@ warm), so idle tenants cost ~0 RAM. Resident app microVMs measured
 Box-local gates (passed 2026-06-09 with a temporary local `--api-url`):
 
 - `/api/v1/healthz` returns `{"ok":true}` through Caddy TLS.
-- claim → publish → share `examples/hello-site` serves through Caddy.
+- project apply → git push → share serves a Project Output through Caddy.
 - `https://api.finite.chat/` classifies as the API plane, not a site page
   (dispatch regression gate).
 - `https://git.finite.chat/PROJECT.git` routes to the Git plane; an editor
@@ -178,18 +205,77 @@ Box-local gates (passed 2026-06-09 with a temporary local `--api-url`):
   `git-http-backend`.
 - Restarting `finite-saas-sites` loses nothing.
 
-Tier-2 gates (passed 2026-06-10): bun+SQLite, FastHTML (uv inline
-deps), and Next.js standalone apps publish with `fsite publish-app`,
-serve through the proxy with their visibility gates, persist data in
-`$DATA_DIR`, and come back up via reconcile after a daemon restart.
+Tier-2 runtime gates (passed 2026-06-10): bun+SQLite, FastHTML (uv inline
+deps), and Next.js standalone app bundles serve through the proxy with their
+visibility gates, persist data in `$DATA_DIR`, and come back up via reconcile
+after a daemon restart. App outputs need a Project-first agent surface before
+they are re-advertised.
 
 Remaining gates once Cloudflare DNS is live:
 
 - `curl https://api.finite.chat/api/v1/healthz` from anywhere.
-- `fsite claim` + `fsite publish` from a real agent workspace (proves
-  NIP-98 URL matching through the proxy — closes debt ledger item 7).
+- `fsite project apply` + `fsite auth git` + `git push origin main` from a
+  real agent workspace (proves NIP-98 URL matching and git smart HTTP through
+  the proxy — closes debt ledger item 7).
 - A magic link arrives at a real inbox (after the Resend flip), logs the
   viewer in, and removing the email revokes access on refresh.
+
+## 5a. Routine server rollout
+
+Run these commands from the repo root after local tests pass. They sync the
+current checkout to the production source checkout, build on the box, install
+the two production binaries, restart the service, and smoke test the public
+control and serving planes.
+
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+
+ssh finite-lat-2 'install -d ~/finite-sites'
+rsync -az --delete \
+  --exclude .git \
+  --exclude target \
+  --exclude .dev-data \
+  --exclude .finite \
+  --exclude '.env*' \
+  --exclude node_modules \
+  --exclude .direnv \
+  ./ finite-lat-2:~/finite-sites/
+
+ssh finite-lat-2 \
+  'rm -rf ~/finite-sites/.finite ~/finite-sites/.dev-data ~/finite-sites/node_modules ~/finite-sites/.direnv && rm -f ~/finite-sites/.env ~/finite-sites/.env.*'
+
+ssh finite-lat-2 \
+  'cd ~/finite-sites && PATH="$HOME/.cargo/bin:$PATH" cargo build --release'
+ssh finite-lat-2 \
+  'cd ~/finite-sites && sudo install -m 0755 target/release/finitesitesd target/release/fsite /usr/local/bin/'
+ssh finite-lat-2 \
+  'sudo systemctl daemon-reload && sudo systemctl restart finite-saas-sites'
+
+curl https://api.finite.chat/api/v1/healthz
+curl -I https://finitechat-native-mockup.finite.chat/
+curl https://finitechat-native-mockup.finite.chat/llms.txt
+```
+
+If the rollout changes Caddy files or systemd unit files, install those files
+explicitly before `daemon-reload`, then reload Caddy after the service restart:
+
+```sh
+ssh finite-lat-2 \
+  'cd ~/finite-sites && sudo install -m 0644 deploy/finite-lat-2/finite-saas-sites.service /etc/systemd/system/'
+ssh finite-lat-2 \
+  'cd ~/finite-sites && sudo install -m 0644 deploy/finite-lat-2/Caddyfile-sites /etc/caddy/Caddyfile'
+ssh finite-lat-2 \
+  'sudo systemctl daemon-reload && sudo systemctl restart finite-saas-sites && sudo systemctl reload caddy'
+```
+
+If a deploy fails after install, use the journal first; the service owns all
+control-plane, Git, and serving-plane state transitions:
+
+```sh
+ssh finite-lat-2 'journalctl -u finite-saas-sites -n 120 --no-pager'
+```
 
 ## 5b. Project-first reset and example redeploy
 

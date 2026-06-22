@@ -3,8 +3,8 @@
 Finite Sites publishing authorization is a local **publish grant cache** keyed
 by User Key pubkey. The existing operator allowlist becomes one grant source;
 Core becomes the future paid-entitlement source. `finitesitesd` checks this
-local cache for claim and publish mutations and never calls Core in the hot
-path for serving site traffic.
+local cache for Project apply and git deploy mutations and never calls Core in
+the hot path for serving site traffic.
 
 The grant cache records:
 
@@ -14,10 +14,10 @@ The grant cache records:
 - optional expiry;
 - grant/update/revoke timestamps.
 
-Any active, unexpired grant for a pubkey allows that owner to claim and publish.
-Revoking all grants stops new claims and publishes on the next request.
-Already-published sites keep serving from the registry and blob store even when
-Core is unavailable or a grant expires.
+Any active, unexpired grant for a pubkey allows that owner to create Project
+Outputs and deploy new Versions. Revoking all grants stops new Project applies
+and git deploys on the next request. Already-published sites keep serving from
+the registry and blob store even when Core is unavailable or a grant expires.
 
 The deployed `allow`, `disallow`, and `allowed` operator commands remain as
 compatibility surfaces. Internally they now mutate `operator` grants. Existing

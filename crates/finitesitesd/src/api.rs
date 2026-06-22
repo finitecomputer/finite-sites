@@ -8,29 +8,25 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, OriginalUri, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 
 use finitesites_engine::EngineError;
 use finitesites_proto::dto::{
-    ApiErrorBody, ClaimRequest, ClaimResponse, GitAuthRequest, GitAuthResponse,
-    ProjectApplyRequest, ProjectApplyResponse, ProjectCollaboratorRemoveRequest,
-    ProjectCollaboratorRemoveResponse, PublishBeginRequest, PublishBeginResponse,
-    PublishFinalizeResponse, SharingRequest, SiteListResponse,
+    ApiErrorBody, GitAuthRequest, GitAuthResponse, ProjectApplyRequest, ProjectApplyResponse,
+    ProjectCollaboratorRemoveRequest, ProjectCollaboratorRemoveResponse, SharingRequest,
+    SiteListResponse,
 };
-use finitesites_proto::limits::{MAX_API_BODY_BYTES, MAX_APP_BUNDLE_BYTES};
+use finitesites_proto::limits::MAX_API_BODY_BYTES;
 use finitesites_proto::{ProtoError, nip98};
 
+use crate::mailer::{ProjectCollaboratorInvite, ViewerInvite};
 use crate::server::{AppState, now_unix};
 
 pub fn router(state: Arc<AppState>) -> Router {
-    // The blob route must admit app bundles; the engine enforces the
-    // tighter static-file ceiling per publish kind.
-    let blob_limit = DefaultBodyLimit::max(MAX_APP_BUNDLE_BYTES as usize + 1024);
     Router::new()
         .route("/api/v1/healthz", get(healthz))
         .route("/api/v1/email-auth/request", post(request_email_login))
         .route("/api/v1/email-auth/redeem", post(redeem_email_login))
-        .route("/api/v1/sites/claim", post(claim))
         .route("/api/v1/projects/apply", post(apply_project))
         .route("/api/v1/projects/{slug}/git-auth", post(auth_git))
         .route(
@@ -40,21 +36,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/sites", get(list_sites))
         .route("/api/v1/sites/{name}", get(site_status))
         .route("/api/v1/sites/{name}/sharing", post(set_sharing))
-        .route("/api/v1/sites/{name}/owner-email", post(set_owner_email))
-        .route(
-            "/api/v1/sites/{name}/editors",
-            get(list_editors).post(update_editors),
-        )
-        .route("/api/v1/sites/{name}/publish", post(begin_publish))
-        .route("/api/v1/sites/{name}/source", get(source_snapshot))
-        .route(
-            "/api/v1/publishes/{publish_id}/blobs/{sha256}",
-            put(upload_blob).layer(blob_limit),
-        )
-        .route(
-            "/api/v1/publishes/{publish_id}/finalize",
-            post(finalize_publish),
-        )
         .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES as usize))
         .fallback(api_not_found)
         .with_state(state)
@@ -107,14 +88,11 @@ impl From<EngineError> for ApiError {
                 ApiError::new(StatusCode::FORBIDDEN, "not_authorized", message)
             }
             EngineError::NameTaken => ApiError::new(StatusCode::CONFLICT, "name_taken", message),
-            EngineError::SiteNotFound
-            | EngineError::PublishNotFound
-            | EngineError::ProjectNotFound => {
+            EngineError::SiteNotFound | EngineError::ProjectNotFound => {
                 ApiError::new(StatusCode::NOT_FOUND, "not_found", message)
             }
             EngineError::TooManySites
             | EngineError::TooManyShares
-            | EngineError::TooManyEditors
             | EngineError::TooManyEmailKeys
             | EngineError::TooManyProjectCollaborators => {
                 ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "limit_exceeded", message)
@@ -275,39 +253,9 @@ async fn redeem_email_login(
     }))
 }
 
-async fn claim(
-    State(state): State<Arc<AppState>>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<ClaimResponse>, ApiError> {
-    let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: ClaimRequest = parse_json_body(&body)?;
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let outcome = engine
-        .claim_with_owner_email(
-            &owner,
-            &request.name,
-            &request.site_pubkey,
-            request.owner_email.as_deref(),
-            now_unix(),
-        )
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
-    Ok(Json(ClaimResponse {
-        site_id: outcome.site.id,
-        name: outcome.site.name,
-        url: outcome.url,
-        status: outcome.site.status.as_str().to_string(),
-        already_claimed: outcome.already_claimed,
-        owner_email: outcome.site.owner_email,
-    }))
-}
-
 async fn apply_project(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<InviteQuery>,
     original_uri: OriginalUri,
     headers: HeaderMap,
     body: Bytes,
@@ -316,12 +264,13 @@ async fn apply_project(
     let request: ProjectApplyRequest = parse_json_body(&body)?;
     let git_remote_url = git_remote_url(&state, &request.config.project.slug);
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = engine
+    let mut response = engine
         .apply_project(&owner, &request, git_remote_url, now_unix())
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)
         })?;
+    drop(engine);
     if !response.dry_run
         && let Some(project_id) = response.project_id.as_deref()
         && let Err(error) = crate::git::ensure_bare_project_repo(
@@ -332,6 +281,9 @@ async fn apply_project(
     {
         eprintln!("finitesitesd project repo setup failed: {error}");
         return Err(internal_error("git repository setup failure"));
+    }
+    if query.send_invites && !response.dry_run {
+        send_project_collaborator_invites(&state, &mut response)?;
     }
     Ok(Json(response))
 }
@@ -411,238 +363,120 @@ async fn site_status(
 async fn set_sharing(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(query): Query<InviteQuery>,
     original_uri: OriginalUri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<finitesites_proto::dto::SharingResponse>, ApiError> {
     let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
     let request: SharingRequest = parse_json_body(&body)?;
+    if query.send_invites && request.add_emails.is_empty() {
+        return Err(ApiError::bad_request(
+            "send_invites requires at least one added email",
+        ));
+    }
+    if query.send_invites && request.visibility.as_deref() != Some("shared") {
+        return Err(ApiError::bad_request(
+            "send_invites requires shared visibility",
+        ));
+    }
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = engine
+    let mut response = engine
         .set_sharing(&actor, &name, &request, now_unix())
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)
         })?;
-    Ok(Json(response))
-}
-
-async fn set_owner_email(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<finitesites_proto::dto::EditorsResponse>, ApiError> {
-    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: finitesites_proto::dto::OwnerEmailRequest = parse_json_body(&body)?;
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = engine
-        .set_owner_email(&actor, &name, &request.owner_email, now_unix())
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
-    Ok(Json(response))
-}
-
-async fn list_editors(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    Query(query): Query<SourceQuery>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-) -> Result<Json<finitesites_proto::dto::EditorsResponse>, ApiError> {
-    let actor = authenticate(&state, &headers, "GET", &original_uri, None)?;
-    let engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = engine
-        .list_editors_with_actor_email(&actor, query.email.as_deref(), &name, now_unix())
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
-    Ok(Json(response))
-}
-
-async fn update_editors(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<finitesites_proto::dto::EditorsResponse>, ApiError> {
-    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: finitesites_proto::dto::EditorsRequest = parse_json_body(&body)?;
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = engine
-        .update_editors_with_actor_email(
-            &actor,
-            request.actor_email.as_deref(),
-            &name,
-            &request,
-            now_unix(),
-        )
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
-    Ok(Json(response))
-}
-
-async fn begin_publish(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<PublishBeginResponse>, ApiError> {
-    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: PublishBeginRequest = parse_json_body(&body)?;
-
-    // Reject start commands the configured runner cannot execute NOW, so
-    // the publisher gets a 400 instead of a published-but-dead site.
-    if let Some(command) = &request.start_command
-        && let Err(error) = state.apps.validate_start(command)
-    {
-        return Err(ApiError::bad_request(error.to_string()));
-    }
-
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-
-    let outcome = match request.actor_email.as_deref() {
-        Some(email) => engine.begin_publish_as_email(
-            &actor,
-            email,
-            &name,
-            &request.manifest,
-            request.spa,
-            request.start_command.as_deref(),
-            request.source.as_ref(),
-            now_unix(),
-        ),
-        None => {
-            // The URL names a site; without actor_email the signer must hold
-            // that exact site's key.
-            let site = engine
-                .resolve_site(&name)
-                .map_err(ApiError::from)?
-                .ok_or_else(|| {
-                    ApiError::new(StatusCode::NOT_FOUND, "not_found", "site not found")
-                })?;
-            if site.site_pubkey != actor {
-                return Err(ApiError::new(
-                    StatusCode::FORBIDDEN,
-                    "not_authorized",
-                    "signer is not this site's key",
-                ));
+    let invite_links = if query.send_invites {
+        assert_eq!(response.visibility, "shared");
+        let mut links = Vec::with_capacity(request.add_emails.len());
+        for email in &request.add_emails {
+            match engine
+                .request_login(&name, email, now_unix())
+                .map_err(|error| {
+                    log_if_internal(&error);
+                    ApiError::from(error)
+                })? {
+                Some(link) => links.push(link),
+                None => {
+                    return Err(internal_error(
+                        "could not create login link for shared invite email",
+                    ));
+                }
             }
-            engine.begin_publish_with_source(
-                &actor,
-                &request.manifest,
-                request.spa,
-                request.start_command.as_deref(),
-                request.source.as_ref(),
-                now_unix(),
-            )
+        }
+        links
+    } else {
+        Vec::new()
+    };
+    drop(engine);
+    for link in &invite_links {
+        let site_url = {
+            let engine = state.engine.lock().expect("engine mutex never poisoned");
+            engine.site_url(&link.site_name)
+        };
+        state
+            .mailer
+            .send_viewer_invite(&ViewerInvite {
+                email: &link.email,
+                site_name: &link.site_name,
+                site_url: &site_url,
+                login_url: &link.url,
+            })
+            .map_err(|error| {
+                eprintln!("finitesitesd viewer invite mail error: {error}");
+                internal_error("mail delivery failure")
+            })?;
+    }
+    response.invited_emails = invite_links.iter().map(|link| link.email.clone()).collect();
+    Ok(Json(response))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct InviteQuery {
+    #[serde(default)]
+    send_invites: bool,
+}
+
+fn send_project_collaborator_invites(
+    state: &AppState,
+    response: &mut ProjectApplyResponse,
+) -> Result<(), ApiError> {
+    if response.collaborators.is_empty() {
+        return Ok(());
+    }
+
+    let mut tokens = Vec::with_capacity(response.collaborators.len());
+    {
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        for collaborator in &response.collaborators {
+            let token = engine
+                .request_email_login(&collaborator.email, now_unix())
+                .map_err(|error| {
+                    log_if_internal(&error);
+                    ApiError::from(error)
+                })?;
+            tokens.push((token.email, collaborator.role.clone(), token.token));
         }
     }
-    .map_err(|error| {
-        log_if_internal(&error);
-        ApiError::from(error)
-    })?;
-    Ok(Json(PublishBeginResponse {
-        publish_id: outcome.publish_id,
-        missing: outcome.missing,
-    }))
-}
 
-async fn upload_blob(
-    State(state): State<Arc<AppState>>,
-    Path((publish_id, sha256)): Path<(String, String)>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let actor = authenticate(&state, &headers, "PUT", &original_uri, Some(&body))?;
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    engine
-        .upload_blob_as_actor(&actor, &publish_id, &sha256, &body, now_unix())
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "ok": true }))))
-}
-
-async fn finalize_publish(
-    State(state): State<Arc<AppState>>,
-    Path(publish_id): Path<String>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<PublishFinalizeResponse>, ApiError> {
-    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let outcome = engine
-        .finalize_publish_as_actor(&actor, &publish_id, now_unix())
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
-    // App publishes go live (or restart) immediately after finalize. A
-    // deploy failure is the operator's problem, not the publisher's: the
-    // version is committed, reconcile retries at the next daemon start.
-    if let Some(deploy) = &outcome.app {
-        let bundle_path = engine.blob_file_path(&deploy.bundle_sha256);
-        if let Err(error) = state.apps.deploy(deploy, &bundle_path, now_unix()) {
-            eprintln!("app deploy failed for {}: {error}", deploy.site_id);
-        }
+    for (email, role, token) in &tokens {
+        state
+            .mailer
+            .send_project_collaborator_invite(&ProjectCollaboratorInvite {
+                email,
+                project_slug: &response.slug,
+                role,
+                api_url: &state.api_url,
+                git_remote_url: &response.git_remote_url,
+                email_login_token: token,
+                outputs: &response.outputs,
+            })
+            .map_err(|error| {
+                eprintln!("finitesitesd project collaborator invite mail error: {error}");
+                internal_error("mail delivery failure")
+            })?;
     }
-    Ok(Json(PublishFinalizeResponse {
-        site_id: outcome.site_id,
-        version_number: outcome.version_number,
-        url: outcome.url,
-        path_count: outcome.path_count,
-        total_bytes: outcome.total_bytes,
-        source: outcome.source,
-    }))
-}
-
-#[derive(serde::Deserialize)]
-struct SourceQuery {
-    email: Option<String>,
-}
-
-async fn source_snapshot(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    Query(query): Query<SourceQuery>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let actor = authenticate(&state, &headers, "GET", &original_uri, None)?;
-    let engine = state.engine.lock().expect("engine mutex never poisoned");
-    let source = engine
-        .source_snapshot(&actor, query.email.as_deref(), &name, now_unix())
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
-    let headers = [
-        (header::CONTENT_TYPE, "application/gzip".to_string()),
-        (
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{name}-source.tar.gz\""),
-        ),
-        (
-            "x-finite-source-version".parse().unwrap(),
-            source.version_number.to_string(),
-        ),
-        ("x-finite-source-sha256".parse().unwrap(), source.sha256),
-        (
-            "x-finite-source-size".parse().unwrap(),
-            source.size.to_string(),
-        ),
-    ];
-    Ok((StatusCode::OK, headers, source.bytes).into_response())
+    response.invited_emails = tokens.iter().map(|(email, _, _)| email.clone()).collect();
+    Ok(())
 }

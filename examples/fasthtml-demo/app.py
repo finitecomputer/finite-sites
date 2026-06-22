@@ -24,7 +24,7 @@ def get():
     rows = db.execute("SELECT name, at FROM entries ORDER BY rowid DESC LIMIT 10").fetchall()
     return Titled(
         "FastHTML on Finite",
-        P("A Python server app, published with ", Code("fsite publish-app"), "."),
+        P("A Python server app fixture for a future Project Output type."),
         Form(
             Input(name="name", placeholder="your name", required=True),
             Button("sign the guestbook"),

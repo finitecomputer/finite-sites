@@ -42,20 +42,20 @@ builds.
 
 ## Tier 1: static
 
-- **hello-site** — plain files. Legacy site-first check:
-  `fsite publish NAME examples/hello-site`.
+- **hello-site** — plain files. Commit the directory as a Project Output and
+  push the configured Deploy Branch.
 - **spa-pushstate** — dependency-free single-page app using the history
-  API. Needs `--spa` so deep links serve the shell:
-  `fsite publish NAME examples/spa-pushstate --spa`.
+  API. Set `spa = true` for that Project Output so deep links serve the
+  shell.
 - **react-bun-spa** — React 19 + React Router 7 bundled with Bun:
   ```sh
   cd examples/react-bun-spa
   bun install && bun run build
-  fsite publish NAME dist --spa
+  # commit dist/ as the configured Project Output path, then git push
   ```
   Bun's HTML entrypoint build (`bun build index.html --outdir=dist`)
-  rewrites the script tag to the hashed bundle; `--spa` makes router
-  paths refresh-safe. That's the whole recipe.
+  rewrites the script tag to the hashed bundle; `spa = true` makes router
+  paths refresh-safe.
 
 ## Tier 2: server apps (in progress)
 
@@ -64,6 +64,6 @@ builds.
 - **fasthtml-demo** — Python FastHTML with PEP 723 inline dependencies,
   run as `uv run app.py` on `$PORT`.
 
-Published with `fsite publish-app NAME PATH --start "CMD"`; the platform
-runs the process in a sandbox and proxies the site host to it, behind the
-same private/shared/public gate as static sites.
+These are future app-output fixtures. Server apps are not part of the current
+agent-facing publish surface; current Project Outputs deploy committed static
+bytes.
