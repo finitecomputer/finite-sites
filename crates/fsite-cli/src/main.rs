@@ -914,9 +914,7 @@ fn whoami() -> Result<(), CliError> {
     println!("pubkey: {}", identity.pubkey);
     println!("file:   {}", keys::identity_path()?.display());
     println!();
-    println!(
-        "ask a finite operator to grant this npub publishing access before creating Project Outputs"
-    );
+    println!("server grants are checked by project apply and auth git, not by whoami");
     Ok(())
 }
 
