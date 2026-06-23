@@ -5,7 +5,7 @@ active Version did not publish that path itself.
 
 The file is platform guidance for agents. It explains that the output is backed
 by a Project Repository, names the Project slug and Git Remote, points to
-`fsite auth git PROJECT --email EMAIL --output json`, and tells agents to clone,
+`fsite auth git PROJECT [--email EMAIL] --store --output json`, and tells agents to clone,
 edit source/deploy bytes, commit, and push the configured Deploy Branch.
 
 If a Project Output publishes its own `/llms.txt`, the authored file wins and

@@ -321,7 +321,7 @@ fsite project apply \
 
 fsite email-login skyler@example.com
 fsite email-redeem skyler@example.com TOKEN_FROM_EMAIL
-fsite auth git finitechat-native --email skyler@example.com --output json
+fsite auth git finitechat-native --email skyler@example.com --store --output json
 ```
 
 Use the returned Git Credential with standard git:

@@ -50,7 +50,7 @@ Deploy path: {output_path}
 Git remote: {git_remote_url}
 API URL: {api_url}
 
-Use the editor email address the human gave you. Do not guess an email address, and do not publish with a different identity.
+Use the identity the human approved. If you are acting as a native Finite user or agent already added to this Project, use the local User Key path. If the human gave you an editor email address, use the email path. Do not guess an email address, and do not publish with a different identity.
 
 Install the fsite CLI:
 
@@ -60,14 +60,21 @@ Install the fsite CLI:
 
 {api_configuration}
 
-Verify this machine for the editor email if it is not already verified:
+If you are a native Project Collaborator, mint and store a scoped Git Credential:
+
+fsite auth git {project_slug} --store --output json
+
+If you are using an editor email, verify this machine for that email if it is not already verified:
 
 fsite email-login YOUR_EDITOR_EMAIL
 fsite email-redeem YOUR_EDITOR_EMAIL TOKEN_FROM_EMAIL
 
-Mint a scoped Git Credential and clone the Project Repository:
+Then mint and store a scoped Git Credential:
 
-fsite auth git {project_slug} --email YOUR_EDITOR_EMAIL --output json
+fsite auth git {project_slug} --email YOUR_EDITOR_EMAIL --store --output json
+
+Clone the Project Repository:
+
 git clone {git_remote_url}
 cd {project_slug}
 
@@ -88,7 +95,7 @@ Rules:
 - Finite Sites does not run builds; run builds yourself and commit the resulting deploy bytes.
 - Preserve a user-authored llms.txt if the project contains one.
 - Never commit `.finite/`, `.env*`, private keys, dependency directories, or build caches.
-- If authentication or authorization fails, ask the human to confirm the Project Collaborator grant for YOUR_EDITOR_EMAIL.
+- If authentication or authorization fails, ask the human to confirm the Project Collaborator grant for the approved native identity or editor email.
 "
     )
 }
@@ -111,9 +118,10 @@ mod tests {
         );
 
         assert!(text.contains("Project: demo-project"));
-        assert!(
-            text.contains("fsite auth git demo-project --email YOUR_EDITOR_EMAIL --output json")
-        );
+        assert!(text.contains(
+            "fsite auth git demo-project --email YOUR_EDITOR_EMAIL --store --output json"
+        ));
+        assert!(text.contains("fsite auth git demo-project --store --output json"));
         assert!(text.contains("git clone https://git.finite.chat/demo-project.git"));
         assert!(text.contains("git push origin main"));
         assert!(!text.contains("export FINITE_SITES_API"));

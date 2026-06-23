@@ -144,8 +144,10 @@ pub struct ProjectCollaboratorRemoveResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitAuthRequest {
-    /// Email identity whose verified local key signs this request.
-    pub email: String,
+    /// Email identity whose verified local key signs this request. Omit this
+    /// when the local User Key is already a native Project Collaborator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

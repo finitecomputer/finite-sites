@@ -252,11 +252,41 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
     let unverified = fx.engine.mint_git_credential(
         OTHER_OWNER,
         "finitechat-native",
-        "skyler@example.com",
+        Some("skyler@example.com"),
         remote("finitechat-native"),
         NOW + 1,
     );
     assert!(matches!(unverified, Err(EngineError::NotAuthorized)));
+
+    let owner_credential = fx
+        .engine
+        .mint_git_credential(
+            OWNER,
+            "finitechat-native",
+            None,
+            remote("finitechat-native"),
+            NOW + 1,
+        )
+        .unwrap();
+    let owner_auth = fx
+        .engine
+        .authenticate_git_credential(
+            &owner_credential.username,
+            &owner_credential.password,
+            "finitechat-native",
+            NOW + 2,
+        )
+        .unwrap();
+    assert!(owner_auth.can_push);
+
+    let stranger_native = fx.engine.mint_git_credential(
+        OTHER_OWNER,
+        "finitechat-native",
+        None,
+        remote("finitechat-native"),
+        NOW + 2,
+    );
+    assert!(matches!(stranger_native, Err(EngineError::NotAuthorized)));
 
     verify_email_key(&mut fx.engine, "skyler@example.com", OTHER_OWNER);
     let credential = fx
@@ -264,9 +294,9 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
         .mint_git_credential(
             OTHER_OWNER,
             "finitechat-native",
-            "skyler@example.com",
+            Some("skyler@example.com"),
             remote("finitechat-native"),
-            NOW + 2,
+            NOW + 3,
         )
         .unwrap();
     assert_eq!(credential.project_slug, "finitechat-native");
@@ -279,7 +309,7 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
             &credential.username,
             &credential.password,
             "finitechat-native",
-            NOW + 3,
+            NOW + 4,
         )
         .unwrap();
     assert!(auth.can_push);
@@ -289,7 +319,7 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
         &credential.username,
         "wrong",
         "finitechat-native",
-        NOW + 4,
+        NOW + 5,
     );
     assert!(matches!(wrong_password, Err(EngineError::NotAuthorized)));
 
@@ -297,13 +327,13 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
         &credential.username,
         &credential.password,
         "other-project",
-        NOW + 4,
+        NOW + 5,
     );
     assert!(matches!(wrong_project, Err(EngineError::NotAuthorized)));
 
     let removed = fx
         .engine
-        .remove_project_collaborator(OWNER, "finitechat-native", "skyler@example.com", NOW + 5)
+        .remove_project_collaborator(OWNER, "finitechat-native", "skyler@example.com", NOW + 6)
         .unwrap();
     assert!(removed.removed);
     assert_eq!(removed.revoked_git_credentials, 1);
@@ -312,13 +342,13 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
         &credential.username,
         &credential.password,
         "finitechat-native",
-        NOW + 6,
+        NOW + 7,
     );
     assert!(matches!(revoked, Err(EngineError::NotAuthorized)));
 
     let replay = fx
         .engine
-        .remove_project_collaborator(OWNER, "finitechat-native", "skyler@example.com", NOW + 7)
+        .remove_project_collaborator(OWNER, "finitechat-native", "skyler@example.com", NOW + 8)
         .unwrap();
     assert!(!replay.removed);
     assert_eq!(replay.revoked_git_credentials, 0);

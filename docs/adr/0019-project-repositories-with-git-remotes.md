@@ -93,7 +93,10 @@ Core decisions:
   Agent Key when present, and Git Credential. Email bootstrap still creates or
   links a concrete key/agent identity; pushes are not audited as email alone.
 - `fsite auth git PROJECT` mints scoped HTTPS Git Credentials after email
-  verification or Key Challenge. The server never receives private keys.
+  verification for External Principals or User-Key authentication for Native
+  Principals. `--store` is the agent-preferred path: it writes the scoped
+  credential to Git's credential helper instead of printing the password. The
+  server never receives private keys.
 - GRASP/NIP-34 are not required for the first implementation. If Finite Sites
   later needs decentralized repository announcements, patches, issues,
   interoperable servers, or migration across servers, adopt those protocols

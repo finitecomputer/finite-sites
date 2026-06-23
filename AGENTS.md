@@ -41,7 +41,7 @@ Every mutation needs a positive test and at least one negative/replay test.
 fsite describe workflow project-config --output json
 fsite project apply --json project.json --dry-run --output json
 fsite project apply --json project.json --send-invite --output json
-fsite auth git PROJECT --email editor@example.com --output json
+fsite auth git PROJECT --email editor@example.com --store --output json
 git clone https://git.finite.chat/PROJECT.git
 ```
 

@@ -92,7 +92,7 @@ cargo run -p fsite-cli --bin fsite -- project apply \
 cargo run -p fsite-cli --bin fsite -- email-login skyler@example.com
 # copy TOKEN_FROM_EMAIL from .dev-data/outbox/*.txt
 cargo run -p fsite-cli --bin fsite -- email-redeem skyler@example.com TOKEN_FROM_EMAIL
-cargo run -p fsite-cli --bin fsite -- auth git finitechat-native --email skyler@example.com --output json
+cargo run -p fsite-cli --bin fsite -- auth git finitechat-native --email skyler@example.com --store --output json
 git clone http://git.sites.localhost:8787/finitechat-native.git /tmp/finitechat-native
 rsync -a --delete examples/finitechat-native-mockup/ /tmp/finitechat-native/
 cd /tmp/finitechat-native
@@ -155,11 +155,19 @@ commits deploy bytes, and pushes the Deploy Branch:
 ```sh
 fsite email-login editor@example.com
 fsite email-redeem editor@example.com TOKEN_FROM_EMAIL
-fsite auth git finitechat-native --email editor@example.com --output json
+fsite auth git finitechat-native --email editor@example.com --store --output json
 git clone https://git.finite.chat/finitechat-native.git
 cd finitechat-native
 # edit, test, build if needed, commit deploy bytes
 git push origin main
+```
+
+If the local User Key is already a native Project Collaborator, omit
+`--email` and no email verification round trip is needed:
+
+```sh
+fsite auth git finitechat-native --store --output json
+git clone https://git.finite.chat/finitechat-native.git
 ```
 
 Owners can remove a Project Collaborator through the same agent-facing

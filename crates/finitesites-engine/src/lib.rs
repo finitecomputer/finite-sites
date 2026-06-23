@@ -393,23 +393,35 @@ impl Engine {
         &mut self,
         actor_pubkey: &str,
         project_slug: &str,
-        actor_email: &str,
+        actor_email: Option<&str>,
         git_remote_url: String,
         now: u64,
     ) -> Result<GitAuthResponse, EngineError> {
         assert!(hex::is_hex32(actor_pubkey));
-        let email = validate_email(actor_email)?;
         let project = self
             .store
             .project_by_slug(project_slug)?
             .ok_or(EngineError::ProjectNotFound)?;
-        if !self.store.has_email_key(&email, actor_pubkey)? {
-            return Err(EngineError::NotAuthorized);
-        }
-        let collaborator = self
-            .store
-            .active_project_collaborator_by_email(&project.id, &email)?
-            .ok_or(EngineError::NotAuthorized)?;
+        let collaborator = match actor_email {
+            Some(raw_email) => {
+                let email = validate_email(raw_email)?;
+                if !self.store.has_email_key(&email, actor_pubkey)? {
+                    return Err(EngineError::NotAuthorized);
+                }
+                self.store
+                    .active_project_collaborator_by_email(&project.id, &email)?
+                    .ok_or(EngineError::NotAuthorized)?
+            }
+            None => {
+                let principal = self
+                    .store
+                    .principal_by_pubkey(actor_pubkey)?
+                    .ok_or(EngineError::NotAuthorized)?;
+                self.store
+                    .active_project_collaborator_by_principal(&project.id, &principal.id)?
+                    .ok_or(EngineError::NotAuthorized)?
+            }
+        };
         if collaborator.role == ProjectCollaboratorRole::Viewer {
             return Err(EngineError::NotAuthorized);
         }

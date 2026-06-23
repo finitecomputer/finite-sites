@@ -5,7 +5,7 @@
 //!
 //!   fsite whoami
 //!   fsite project apply --json project.json --dry-run --output json
-//!   fsite auth git PROJECT --email EMAIL --output json
+//!   fsite auth git PROJECT [--email EMAIL] [--store] [--output json]
 //!   fsite status NAME
 //!   fsite list
 //!   fsite share NAME [--shared|--private] [--public --yes-public]
@@ -16,14 +16,15 @@
 mod api;
 mod keys;
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use thiserror::Error;
 
 use finitesites_proto::dto::{
-    GitAuthRequest, ProjectApplyRequest, ProjectCollaboratorRemoveRequest, SharingRequest,
+    GitAuthRequest, GitAuthResponse, ProjectApplyRequest, ProjectCollaboratorRemoveRequest,
+    SharingRequest,
 };
 use finitesites_proto::limits::MAX_EMAILS_PER_SHARING_REQUEST;
 use finitesites_proto::npub;
@@ -120,7 +121,7 @@ fn usage() -> String {
      fsite describe [workflow NAME] [--output json]\n  \
      fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n  \
      fsite project collaborator remove PROJECT --email EMAIL [--output json]\n  \
-     fsite auth git PROJECT --email EMAIL [--output json]\n  \
+     fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n  \
      fsite status NAME\n  fsite list\n  fsite share NAME [--shared|--private] \
      [--public --yes-public] [--send-invite] [--add-email EMAIL]... [--remove-email EMAIL]..."
         .to_string()
@@ -159,11 +160,11 @@ fn project_collaborator_remove_help() -> &'static str {
 }
 
 fn auth_help() -> &'static str {
-    "usage: fsite auth git PROJECT --email EMAIL [--output json]\n\nMint scoped HTTPS Git Credentials after email verification."
+    "usage: fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n\nMint scoped HTTPS Git Credentials. Omit --email when the local User Key is already a native Project Collaborator. Use --store to save the credential for standard git without printing the password."
 }
 
 fn auth_git_help() -> &'static str {
-    "usage: fsite auth git PROJECT --email EMAIL [--output json]\n\nReturns git_remote_url, username, and password for standard git clone/push against one Project Repository."
+    "usage: fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n\nReturns git_remote_url, username, and password for standard git clone/push against one Project Repository. With --store, configures a path-aware Git credential helper for the Finite Git host, stores the scoped credential, and omits the password from output."
 }
 
 fn status_help() -> &'static str {
@@ -254,8 +255,8 @@ fn describe_commands() -> serde_json::Value {
             },
             {
                 "name": "auth git",
-                "summary": "Mint a scoped HTTPS Git Credential after email verification.",
-                "usage": "fsite auth git PROJECT --email EMAIL [--output json]"
+                "summary": "Mint a scoped HTTPS Git Credential for a native Project Collaborator or verified External Principal.",
+                "usage": "fsite auth git PROJECT [--email EMAIL] [--store] [--output json]"
             },
             {
                 "name": "describe workflow",
@@ -301,10 +302,11 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
         "edit-shared-project" => serde_json::json!({
             "name": "edit-shared-project",
             "steps": [
-                "Run fsite email-login EDITOR_EMAIL if this machine is not verified.",
-                "Run fsite email-redeem EDITOR_EMAIL TOKEN_FROM_EMAIL.",
-                "Run fsite auth git PROJECT --email EDITOR_EMAIL --output json.",
-                "Use the returned git_remote_url, username, and password with standard git.",
+                "If you are a native Project Collaborator, run fsite auth git PROJECT --store --output json.",
+                "If you are using an External Principal email, run fsite email-login EDITOR_EMAIL if this machine is not verified.",
+                "For email auth, run fsite email-redeem EDITOR_EMAIL TOKEN_FROM_EMAIL.",
+                "For email auth, run fsite auth git PROJECT --email EDITOR_EMAIL --store --output json.",
+                "Clone using the returned git_remote_url; the password is stored in Git's credential helper and is not printed.",
                 "Clone, edit source, run the project's tests/build, commit deploy bytes, and push the Deploy Branch."
             ]
         }),
@@ -592,9 +594,38 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
         return print_help(auth_git_help());
     }
+    let options = parse_auth_git_args(args)?;
+    let key = match &options.email {
+        Some(email) => keys::load_or_create_email_key(email)?,
+        None => keys::load_or_create_identity()?,
+    };
+    let client = api::Client::from_env();
+    let response = client.auth_git(
+        &key,
+        &options.project,
+        &GitAuthRequest {
+            email: options.email.clone(),
+        },
+    )?;
+    if options.store {
+        store_git_credential(&response)?;
+    }
+    print_git_auth_response(&response, options.output_json, options.store)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AuthGitOptions {
+    project: String,
+    email: Option<String>,
+    output_json: bool,
+    store: bool,
+}
+
+fn parse_auth_git_args(args: &[String]) -> Result<AuthGitOptions, CliError> {
     let mut positionals: Vec<&String> = Vec::new();
     let mut email: Option<String> = None;
     let mut output_json = false;
+    let mut store = false;
     let mut index: usize = 0;
     // Bounded by argv length.
     while index < args.len() {
@@ -618,6 +649,10 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
                 output_json = true;
                 index += 2;
             }
+            "--store" => {
+                store = true;
+                index += 1;
+            }
             other if other.starts_with("--") => {
                 return Err(CliError::Usage(format!("unknown flag `{other}`")));
             }
@@ -629,23 +664,244 @@ fn auth_git(args: &[String]) -> Result<(), CliError> {
     }
     let [project] = positionals.as_slice() else {
         return Err(CliError::Usage(
-            "usage: fsite auth git PROJECT --email EMAIL [--output json]".to_string(),
+            "usage: fsite auth git PROJECT [--email EMAIL] [--store] [--output json]".to_string(),
         ));
     };
-    let email = email.ok_or_else(|| CliError::Usage("--email is required".to_string()))?;
-    let key = keys::load_or_create_email_key(&email)?;
-    let client = api::Client::from_env();
-    let response = client.auth_git(&key, project, &GitAuthRequest { email })?;
+    Ok(AuthGitOptions {
+        project: (*project).clone(),
+        email,
+        output_json,
+        store,
+    })
+}
+
+fn print_git_auth_response(
+    response: &GitAuthResponse,
+    output_json: bool,
+    stored: bool,
+) -> Result<(), CliError> {
     if output_json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&response).expect("response serializes")
-        );
+        if stored {
+            let value = serde_json::json!({
+                "project_slug": response.project_slug,
+                "git_remote_url": response.git_remote_url,
+                "credential_id": response.credential_id,
+                "username": response.username,
+                "expires_at": response.expires_at,
+                "stored": true
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).expect("response serializes")
+            );
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&response).expect("response serializes")
+            );
+        }
     } else {
         println!("git:      {}", response.git_remote_url);
         println!("username: {}", response.username);
-        println!("password: {}", response.password);
-        println!("use this credential with standard git HTTPS for this project only");
+        if stored {
+            println!("password: stored in git credential helper");
+            println!("clone:    git clone {}", response.git_remote_url);
+        } else {
+            println!("password: {}", response.password);
+            println!("tip:      rerun with --store to save it without printing it");
+        }
+        println!("scope:    this credential works for this project only");
+        println!("expires:  never, unless the Project Collaborator is removed");
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GitCredentialContext {
+    protocol: String,
+    host: String,
+    path: String,
+}
+
+fn git_credential_context(remote_url: &str) -> Result<GitCredentialContext, CliError> {
+    let Some((protocol, rest)) = remote_url.split_once("://") else {
+        return Err(CliError::Usage(
+            "git_remote_url must include http:// or https://".to_string(),
+        ));
+    };
+    if protocol != "http" && protocol != "https" {
+        return Err(CliError::Usage(
+            "git_remote_url must use http or https".to_string(),
+        ));
+    }
+    let Some((host, raw_path)) = rest.split_once('/') else {
+        return Err(CliError::Usage(
+            "git_remote_url must include a repository path".to_string(),
+        ));
+    };
+    if host.is_empty() || raw_path.is_empty() {
+        return Err(CliError::Usage(
+            "git_remote_url must include a host and repository path".to_string(),
+        ));
+    }
+    Ok(GitCredentialContext {
+        protocol: protocol.to_string(),
+        host: host.to_string(),
+        path: raw_path.to_string(),
+    })
+}
+
+fn credential_store_path() -> Result<PathBuf, CliError> {
+    let home = std::env::var("HOME")
+        .map_err(|_| CliError::Key("HOME is not set; cannot store git credential".to_string()))?;
+    Ok(PathBuf::from(home)
+        .join(".config")
+        .join("finite-sites")
+        .join("git-credentials"))
+}
+
+fn set_private_file_permissions(path: &Path) -> Result<(), CliError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+                |error| CliError::Io(format!("cannot chmod {}: {error}", path.display())),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_private_parent(path: &Path) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::Io(format!("{} has no parent directory", path.display())))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| CliError::Io(format!("cannot create {}: {error}", parent.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| CliError::Io(format!("cannot chmod {}: {error}", parent.display())))?;
+    }
+    Ok(())
+}
+
+fn run_git_config(args: &[&str]) -> Result<(), CliError> {
+    let command_args = git_config_command_args(args);
+    let output = Command::new("git")
+        .args(&command_args)
+        .output()
+        .map_err(|error| CliError::Io(format!("cannot run git config: {error}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(CliError::Io(format!(
+        "git config failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
+fn git_config_command_args(args: &[&str]) -> Vec<String> {
+    let mut command_args = Vec::with_capacity(args.len() + 1);
+    command_args.push("config".to_string());
+    // Bounded by the fixed git config invocations in this CLI.
+    for arg in args {
+        command_args.push((*arg).to_string());
+    }
+    command_args
+}
+
+fn configure_git_credential_storage(context: &GitCredentialContext) -> Result<PathBuf, CliError> {
+    let store_path = credential_store_path()?;
+    ensure_private_parent(&store_path)?;
+    let url = format!("{}://{}", context.protocol, context.host);
+    let helper_key = format!("credential.{url}.helper");
+    let path_key = format!("credential.{url}.useHttpPath");
+    let helper_value = format!("store --file {}", store_path.display());
+    run_git_config(&["--global", "--replace-all", &helper_key, &helper_value])?;
+    run_git_config(&["--global", "--replace-all", &path_key, "true"])?;
+    Ok(store_path)
+}
+
+fn credential_approve_input(
+    context: &GitCredentialContext,
+    username: &str,
+    password: &str,
+) -> String {
+    format!(
+        "protocol={}\nhost={}\npath={}\nusername={}\npassword={}\n\n",
+        context.protocol, context.host, context.path, username, password
+    )
+}
+
+fn credential_fill_input(context: &GitCredentialContext) -> String {
+    format!(
+        "protocol={}\nhost={}\npath={}\n\n",
+        context.protocol, context.host, context.path
+    )
+}
+
+fn run_git_credential(command: &str, input: &str) -> Result<String, CliError> {
+    let mut child = Command::new("git")
+        .args(["credential", command])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| CliError::Io(format!("cannot run git credential {command}: {error}")))?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| CliError::Io("cannot open git credential stdin".to_string()))?;
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|error| CliError::Io(format!("cannot write git credential input: {error}")))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| CliError::Io(format!("git credential {command} failed: {error}")))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    }
+    Err(CliError::Io(format!(
+        "git credential {command} failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
+fn credential_output_value(output: &str, key: &str) -> Option<String> {
+    // Bounded by git credential's short key-value output.
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix(key)
+            && let Some(value) = value.strip_prefix('=')
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn store_git_credential(response: &GitAuthResponse) -> Result<(), CliError> {
+    let context = git_credential_context(&response.git_remote_url)?;
+    let store_path = configure_git_credential_storage(&context)?;
+    run_git_credential(
+        "approve",
+        &credential_approve_input(&context, &response.username, &response.password),
+    )?;
+    set_private_file_permissions(&store_path)?;
+    let filled = run_git_credential("fill", &credential_fill_input(&context))?;
+    let filled_username = credential_output_value(&filled, "username")
+        .ok_or_else(|| CliError::Io("git credential helper did not return username".to_string()))?;
+    let filled_password = credential_output_value(&filled, "password")
+        .ok_or_else(|| CliError::Io("git credential helper did not return password".to_string()))?;
+    if filled_username != response.username || filled_password != response.password {
+        return Err(CliError::Io(
+            "git credential helper returned a different credential".to_string(),
+        ));
     }
     Ok(())
 }
@@ -906,6 +1162,58 @@ mod tests {
             run(&args(&["list", "extra"])),
             Err(CliError::Usage(_))
         ));
+    }
+
+    #[test]
+    fn auth_git_parses_native_and_external_store_modes() {
+        let native =
+            parse_auth_git_args(&args(&["finite-curriculum", "--store", "--output", "json"]))
+                .unwrap();
+        assert_eq!(
+            native,
+            AuthGitOptions {
+                project: "finite-curriculum".to_string(),
+                email: None,
+                output_json: true,
+                store: true,
+            }
+        );
+
+        let external =
+            parse_auth_git_args(&args(&["finite-curriculum", "--email", "paul@finite.vip"]))
+                .unwrap();
+        assert_eq!(external.email.as_deref(), Some("paul@finite.vip"));
+        assert!(!external.store);
+    }
+
+    #[test]
+    fn git_credential_context_is_path_aware() {
+        let context =
+            git_credential_context("https://git.finite.chat/finite-curriculum.git").unwrap();
+        assert_eq!(context.protocol, "https");
+        assert_eq!(context.host, "git.finite.chat");
+        assert_eq!(context.path, "finite-curriculum.git");
+        let input = credential_approve_input(&context, "user", "secret");
+        assert!(input.contains("path=finite-curriculum.git\n"));
+        assert!(input.contains("username=user\n"));
+        assert!(input.contains("password=secret\n"));
+    }
+
+    #[test]
+    fn git_config_command_uses_config_subcommand() {
+        assert_eq!(
+            git_config_command_args(&[
+                "--global",
+                "credential.https://git.finite.chat.useHttpPath",
+                "true"
+            ]),
+            vec![
+                "config".to_string(),
+                "--global".to_string(),
+                "credential.https://git.finite.chat.useHttpPath".to_string(),
+                "true".to_string(),
+            ]
+        );
     }
 
     #[test]

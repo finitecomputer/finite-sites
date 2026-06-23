@@ -300,7 +300,13 @@ async fn auth_git(
     let git_remote_url = git_remote_url(&state, &slug);
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
     let response = engine
-        .mint_git_credential(&actor, &slug, &request.email, git_remote_url, now_unix())
+        .mint_git_credential(
+            &actor,
+            &slug,
+            request.email.as_deref(),
+            git_remote_url,
+            now_unix(),
+        )
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)

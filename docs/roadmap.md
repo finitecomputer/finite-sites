@@ -81,7 +81,7 @@ implementation stay focused.
   with one site output.
 - `fsite describe workflow project-config --output json` documents the
   `finite.toml` schema and example configs.
-- `fsite auth git PROJECT --email EMAIL --output json` mints a scoped HTTPS
+- `fsite auth git PROJECT [--email EMAIL] --store --output json` mints a scoped HTTPS
   Git Credential.
 - `fsite project collaborator remove PROJECT --email EMAIL --output json`
   removes Project edit access and revokes active Git Credentials for that

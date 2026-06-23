@@ -107,7 +107,7 @@ fn project_collaborator_invite_text(invite: &ProjectCollaboratorInvite<'_>) -> S
          To authenticate this machine for {email}, run:\n\n\
          {api_prefix}fsite email-redeem {email} {token}\n\n\
          Then mint a scoped git credential and clone the project:\n\n\
-         {api_prefix}fsite auth git {project_slug} --email {email} --output json\n\
+         {api_prefix}fsite auth git {project_slug} --email {email} --store --output json\n\
          git clone {git_remote_url}\n\n\
          Edit the repository, commit your changes, and push the deploy branch.\n\
          The email token works once and expires in 15 minutes. If it expires, run:\n\n\
@@ -487,11 +487,9 @@ mod tests {
             outputs: &outputs,
         });
         assert!(project.contains("fsite email-redeem skyler@example.com token123"));
-        assert!(
-            project.contains(
-                "fsite auth git finitechat-native --email skyler@example.com --output json"
-            )
-        );
+        assert!(project.contains(
+            "fsite auth git finitechat-native --email skyler@example.com --store --output json"
+        ));
         assert!(project.contains("git clone https://git.finite.chat/finitechat-native.git"));
         assert!(project.contains("mockup (site)"));
     }
