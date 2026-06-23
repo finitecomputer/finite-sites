@@ -461,6 +461,7 @@ impl Store {
              ON versions(git_ref_event_id) WHERE git_ref_event_id IS NOT NULL",
             [],
         )?;
+        Self::migrate_legacy_sites_shape(&conn)?;
         Self::migrate_legacy_allowed_pubkeys(&conn)?;
         Ok(Store { conn })
     }
@@ -480,6 +481,96 @@ impl Store {
         conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))?;
         // Paired check: the column must exist after the migration.
         conn.prepare(&probe)?;
+        Ok(())
+    }
+
+    fn table_column_names(conn: &Connection, table: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut columns = Vec::new();
+        // Bounded by the schema of one local table.
+        for row in rows {
+            columns.push(row?);
+        }
+        Ok(columns)
+    }
+
+    fn migrate_legacy_sites_shape(conn: &Connection) -> Result<(), StoreError> {
+        let columns = Self::table_column_names(conn, "sites")?;
+        let has_owner_email = columns.iter().any(|column| column == "owner_email");
+        let has_site_pubkey = columns.iter().any(|column| column == "site_pubkey");
+        if !has_owner_email && !has_site_pubkey {
+            return Ok(());
+        }
+        let has_owner_pubkey = columns.iter().any(|column| column == "owner_pubkey");
+        let owner_expr = if has_owner_pubkey {
+            "owner_pubkey"
+        } else if has_site_pubkey {
+            "site_pubkey"
+        } else {
+            return Err(StoreError::CorruptState(
+                "legacy sites owner column missing",
+            ));
+        };
+        let kind_expr = if columns.iter().any(|column| column == "kind") {
+            "kind"
+        } else {
+            "'static'"
+        };
+        let app_port_expr = if columns.iter().any(|column| column == "app_port") {
+            "app_port"
+        } else {
+            "NULL"
+        };
+
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result: Result<(), StoreError> = (|| {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 CREATE TABLE sites_new (
+                   id TEXT PRIMARY KEY,
+                   owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
+                   status TEXT NOT NULL CHECK (status IN ('claimed_unpublished', 'published', 'disabled', 'deleted')),
+                   visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'public')),
+                   kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static', 'app')),
+                   app_port INTEGER UNIQUE CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999)),
+                   active_version_id TEXT REFERENCES versions(id),
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 );",
+            )?;
+            conn.execute(
+                &format!(
+                    "INSERT INTO sites_new
+                        (id, owner_pubkey, status, visibility, kind, app_port, active_version_id, created_at, updated_at)
+                     SELECT id, {owner_expr}, status, visibility, {kind_expr}, {app_port_expr},
+                            active_version_id, created_at, updated_at
+                     FROM sites"
+                ),
+                [],
+            )?;
+            conn.execute_batch(
+                "DROP TABLE sites;
+                 ALTER TABLE sites_new RENAME TO sites;
+                 CREATE INDEX IF NOT EXISTS sites_owner ON sites(owner_pubkey, created_at);
+                 COMMIT;",
+            )?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = conn.execute_batch("ROLLBACK;");
+        }
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        result?;
+        let violations: i64 =
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if violations > 0 {
+            return Err(StoreError::CorruptState(
+                "foreign key violation after sites migration",
+            ));
+        }
         Ok(())
     }
 
@@ -2862,6 +2953,89 @@ mod tests {
 
         let store = Store::open(&db_path).unwrap();
         assert!(!store.has_publish_access(OWNER, NOW + 1).unwrap());
+    }
+
+    #[test]
+    fn migration_rebuilds_legacy_sites_shape_for_project_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sites (
+                   id TEXT PRIMARY KEY,
+                   owner_pubkey TEXT NOT NULL CHECK (length(owner_pubkey) = 64),
+                   owner_email TEXT,
+                   site_pubkey TEXT NOT NULL CHECK (length(site_pubkey) = 64),
+                   status TEXT NOT NULL CHECK (status IN ('claimed_unpublished', 'published', 'disabled', 'deleted')),
+                   visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'public')),
+                   kind TEXT NOT NULL DEFAULT 'static' CHECK (kind IN ('static', 'app')),
+                   app_port INTEGER UNIQUE CHECK (app_port IS NULL OR (app_port >= 21000 AND app_port <= 29999)),
+                   active_version_id TEXT,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO sites
+                   (id, owner_pubkey, owner_email, site_pubkey, status, visibility, kind,
+                    app_port, active_version_id, created_at, updated_at)
+                 VALUES
+                   ('site_legacy',
+                    '1111111111111111111111111111111111111111111111111111111111111111',
+                    NULL,
+                    '2222222222222222222222222222222222222222222222222222222222222222',
+                    'claimed_unpublished',
+                    'private',
+                    'static',
+                    NULL,
+                    NULL,
+                    1750000000,
+                    1750000000);",
+            )
+            .unwrap();
+        }
+
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let legacy_site: (String, String) = store
+                .conn
+                .query_row(
+                    "SELECT owner_pubkey, status FROM sites WHERE id = 'site_legacy'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(legacy_site.0, OWNER);
+            assert_eq!(legacy_site.1, "claimed_unpublished");
+
+            let first = store
+                .apply_project(
+                    OWNER,
+                    "finite-curriculum",
+                    &[project_output("finite-curriculum")],
+                    &[],
+                    NOW,
+                )
+                .unwrap();
+            assert!(first.created);
+            assert_eq!(first.outputs.len(), 1);
+        }
+
+        let mut store = Store::open(&db_path).unwrap();
+        let columns = Store::table_column_names(&store.conn, "sites").unwrap();
+        assert!(!columns.iter().any(|column| column == "owner_email"));
+        assert!(!columns.iter().any(|column| column == "site_pubkey"));
+
+        let replay = store
+            .apply_project(
+                OWNER,
+                "finite-curriculum",
+                &[project_output("finite-curriculum")],
+                &[],
+                NOW + 1,
+            )
+            .unwrap();
+        assert!(!replay.created);
+        assert!(!replay.outputs[0].created);
     }
 
     #[test]
