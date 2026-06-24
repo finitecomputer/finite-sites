@@ -38,6 +38,7 @@ Every mutation needs a positive test and at least one negative/replay test.
 - Collaborative static sites use Project Repositories:
 
 ```sh
+fsite describe workflow publish-static-site --output json
 fsite describe workflow project-config --output json
 fsite project apply --json project.json --dry-run --output json
 fsite project apply --json project.json --send-invite --output json
@@ -47,6 +48,8 @@ git clone https://git.finite.chat/PROJECT.git
 
 - Commit deploy bytes and push the configured Deploy Branch. Finite Sites
   does not run builds.
+- There is no direct bundle upload command. For static sites, commit the
+  selected `finite.toml` output path, then push.
 - Do not reconstruct source from rendered HTML. Use the Project Repository.
 - A generated `/llms.txt` is platform guidance only. If a project publishes
   its own `/llms.txt`, preserve it and treat it as the project's authority.

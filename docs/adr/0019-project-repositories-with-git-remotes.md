@@ -65,6 +65,14 @@ Core decisions:
   `project.slug`, output IDs, `kind = "site"`, `site_name`, `branch`, `path`,
   and `spa`. The CLI must document this schema through Agent-Safe describe
   workflows so agents do not guess it.
+- `fsite describe workflow publish-static-site --output json` is the canonical
+  first command for agents creating a static site Project Output. It must
+  explain the mental model: Project Repository is source, `finite.toml` selects
+  the served output path, Finite serves committed bytes under that path, and
+  there is no direct bundle upload command in the current model.
+- If an agent tries a removed site-first command such as `fsite publish`, the
+  CLI should fail with guidance to the Project Repository workflow rather than
+  a bare unknown-command error.
 - Agents may edit Project Config directly, but should prefer Agent-Safe
   `fsite project apply --dry-run` workflows when creating or changing outputs.
 - Agents own build steps and commit Deploy Outputs. Finite Sites never becomes

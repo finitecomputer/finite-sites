@@ -104,6 +104,8 @@ fn project_collaborator_invite_text(invite: &ProjectCollaboratorInvite<'_>) -> S
     let api_prefix = api_prefix(invite.api_url);
     let mut text = format!(
         "You and your agent have been invited to collaborate on {project_slug} as {role}.\n\n\
+         Agents can inspect the current edit workflow with:\n\n\
+         {api_prefix}fsite describe workflow edit-shared-project --output json\n\n\
          To authenticate this machine for {email}, run:\n\n\
          {api_prefix}fsite email-redeem {email} {token}\n\n\
          Then mint a scoped git credential and clone the project:\n\n\
@@ -487,6 +489,7 @@ mod tests {
             outputs: &outputs,
         });
         assert!(project.contains("fsite email-redeem skyler@example.com token123"));
+        assert!(project.contains("fsite describe workflow edit-shared-project --output json"));
         assert!(project.contains(
             "fsite auth git finitechat-native --email skyler@example.com --store --output json"
         ));

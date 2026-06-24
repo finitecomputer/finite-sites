@@ -4,6 +4,7 @@
 //! sees names, paths, emails, and URLs:
 //!
 //!   fsite whoami
+//!   fsite describe workflow publish-static-site --output json
 //!   fsite project apply --json project.json --dry-run --output json
 //!   fsite auth git PROJECT [--email EMAIL] [--store] [--output json]
 //!   fsite status NAME
@@ -76,6 +77,9 @@ fn run(args: &[String]) -> Result<(), CliError> {
         "status" => status(&args[1..]),
         "list" => no_args_or_help(&args[1..], "fsite list", list_help(), list),
         "share" => share(&args[1..]),
+        "claim" | "publish" | "publish-app" | "source" => Err(CliError::Usage(
+            removed_site_first_command_help(command.as_str()),
+        )),
         "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -116,7 +120,17 @@ fn no_args_or_help(
 }
 
 fn usage() -> String {
-    "usage:\n  fsite whoami\n  fsite email-login EMAIL\n  \
+    "Finite Sites publishes committed files from a Project Repository. The \
+     Project's finite.toml selects the output path that becomes public; source \
+     outside that path stays in the private Project Repository.\n\n\
+     Agent quick start for a static site:\n  \
+     fsite describe workflow publish-static-site --output json\n  \
+     fsite project apply --json project.json --dry-run --output json\n  \
+     fsite project apply --json project.json --send-invite --output json\n  \
+     fsite auth git PROJECT --store --output json\n  \
+     git clone https://git.finite.chat/PROJECT.git\n  \
+     # commit finite.toml plus deploy bytes, then push the Deploy Branch\n\n\
+     Commands:\n  fsite whoami\n  fsite email-login EMAIL\n  \
      fsite email-redeem EMAIL TOKEN\n  \
      fsite describe [workflow NAME] [--output json]\n  \
      fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n  \
@@ -125,6 +139,21 @@ fn usage() -> String {
      fsite status NAME\n  fsite list\n  fsite share NAME [--shared|--private] \
      [--public --yes-public] [--send-invite] [--add-email EMAIL]... [--remove-email EMAIL]..."
         .to_string()
+}
+
+fn removed_site_first_command_help(command: &str) -> String {
+    format!(
+        "`fsite {command}` is not part of the current Project Repository \
+         model. Finite Sites does not upload arbitrary local files directly; \
+         it publishes commits pushed to a Project Repository Deploy Branch.\n\n\
+         Use the agent workflow instead:\n  \
+         fsite describe workflow publish-static-site --output json\n  \
+         fsite project apply --json project.json --dry-run --output json\n  \
+         fsite project apply --json project.json --send-invite --output json\n  \
+         fsite auth git PROJECT --store --output json\n  \
+         git clone https://git.finite.chat/PROJECT.git\n  \
+         # commit finite.toml plus the selected output path, then git push"
+    )
 }
 
 fn whoami_help() -> &'static str {
@@ -140,15 +169,15 @@ fn email_redeem_help() -> &'static str {
 }
 
 fn describe_help() -> &'static str {
-    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: project-config, initial-project-publish, edit-shared-project, grant-collaborator, remove-collaborator."
+    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: project-config, publish-static-site, edit-shared-project, grant-collaborator, remove-collaborator."
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n  fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nCreate/update Project Repositories and manage Project Collaborators. See: fsite describe workflow project-config --output json"
+    "usage:\n  fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n  fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nCreate/update Project Repositories and manage Project Collaborators. For static sites, start with: fsite describe workflow publish-static-site --output json"
 }
 
 fn project_apply_help() -> &'static str {
-    "usage: fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n\nReads Project apply JSON, validates it, optionally writes finite.toml, and creates/updates Project Outputs. Use --send-invite to email Project Collaborators with fsite/git instructions. Use --dry-run before mutating. Use --output json for agent workflows."
+    "usage: fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n\nReads Project apply JSON, validates it, optionally writes finite.toml, and creates/updates Project Outputs. This reserves the Project/Output and config; it does not deploy bytes. Commit finite.toml plus the configured output path to the Project Repository and push the Deploy Branch to publish a Version. Use --send-invite to email Project Collaborators with fsite/git instructions. Use --dry-run before mutating. Use --output json for agent workflows."
 }
 
 fn project_collaborator_help() -> &'static str {
@@ -266,11 +295,63 @@ fn describe_commands() -> serde_json::Value {
         ],
         "workflows": [
             "project-config",
-            "initial-project-publish",
+            "publish-static-site",
             "edit-shared-project",
             "grant-collaborator",
             "remove-collaborator"
-        ]
+        ],
+        "start_here": {
+            "static_site": "fsite describe workflow publish-static-site --output json",
+            "existing_shared_project": "fsite describe workflow edit-shared-project --output json"
+        }
+    })
+}
+
+fn publish_static_site_workflow() -> serde_json::Value {
+    serde_json::json!({
+        "name": "publish-static-site",
+        "mental_model": [
+            "A Project Repository is the editable git source of truth.",
+            "A Project Output is what Finite serves to users.",
+            "finite.toml selects the committed output path for each Project Output.",
+            "For static sites, Finite serves only committed bytes under that configured path.",
+            "Finite Sites does not run builds and does not accept direct file uploads in the current model."
+        ],
+        "steps": [
+            "Put generated static files in a dedicated output directory such as site/ unless the repository is deploy-only.",
+            "Create project apply JSON with project.slug, one output with kind=site, site_name, branch=main, path=site, and spa=false unless the app needs SPA fallback.",
+            "Run fsite project apply --json project.json --dry-run --output json and read any validation error.",
+            "After human confirmation, run fsite project apply --json project.json --send-invite --output json.",
+            "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
+            "Clone the returned git_remote_url.",
+            "Copy/keep finite.toml and the selected output path in the Project Repository. Source, data, and build scripts may also live in the repo, but only the output path is served.",
+            "Run the project build/tests locally if there is a build step.",
+            "Commit finite.toml plus the selected output path.",
+            "Push the configured Deploy Branch. Finite Sites validates committed bytes and creates a Version."
+        ],
+        "must_not": [
+            "Do not look for a direct publish/upload command.",
+            "Do not reconstruct source from the rendered website.",
+            "Do not set path='.' unless the whole repository is intended to be served.",
+            "Do not print Git Credential passwords; prefer --store."
+        ],
+        "project_apply_json_example": {
+            "config": {
+                "project": { "slug": "my-project" },
+                "outputs": {
+                    "site": {
+                        "kind": "site",
+                        "site_name": "my-project",
+                        "branch": "main",
+                        "path": "site",
+                        "spa": false
+                    }
+                }
+            },
+            "dry_run": false,
+            "collaborators": []
+        },
+        "finite_toml_example": "[project]\nslug = \"my-project\"\n\n[outputs.site]\nkind = \"site\"\nsite_name = \"my-project\"\nbranch = \"main\"\npath = \"site\"\nspa = false\n"
     })
 }
 
@@ -289,16 +370,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
             },
             "example": "[project]\nslug = \"finitechat-native\"\n\n[outputs.mockup]\nkind = \"site\"\nsite_name = \"finitechat-native-mockup\"\nbranch = \"main\"\npath = \".\"\nspa = false\n"
         }),
-        "initial-project-publish" => serde_json::json!({
-            "name": "initial-project-publish",
-            "steps": [
-                "Create or build committed deploy bytes in the path selected by finite.toml.",
-                "Run fsite project apply --json project.json --dry-run --output json.",
-                "Run fsite project apply --json project.json --output json. Add --send-invite to email Project Collaborators after the real apply.",
-                "Commit finite.toml and deploy bytes to the Project Repository.",
-                "Push the Deploy Branch; Finite Sites validates committed bytes and creates a Version."
-            ]
-        }),
+        "publish-static-site" => publish_static_site_workflow(),
         "edit-shared-project" => serde_json::json!({
             "name": "edit-shared-project",
             "steps": [
@@ -330,7 +402,7 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
         }),
         other => {
             return Err(CliError::Usage(format!(
-                "unknown workflow `{other}` (project-config|initial-project-publish|edit-shared-project|grant-collaborator|remove-collaborator)"
+                "unknown workflow `{other}` (project-config|publish-static-site|edit-shared-project|grant-collaborator|remove-collaborator)"
             )));
         }
     };
@@ -1117,6 +1189,7 @@ mod tests {
     #[test]
     fn help_is_read_only_for_agent_probe_paths() {
         let commands = [
+            &["--help"][..],
             &["whoami", "--help"][..],
             &["email-login", "--help"],
             &["email-redeem", "--help"],
@@ -1140,6 +1213,9 @@ mod tests {
     #[test]
     fn top_level_usage_is_project_first() {
         let text = usage();
+        assert!(text.contains("publishes committed files from a Project Repository"));
+        assert!(text.contains("source outside that path stays in the private Project Repository"));
+        assert!(text.contains("fsite describe workflow publish-static-site --output json"));
         assert!(text.contains("fsite project apply"));
         assert!(text.contains("fsite auth git"));
         assert!(text.contains("fsite share"));
@@ -1148,6 +1224,34 @@ mod tests {
         assert!(!text.contains("fsite publish-app"));
         assert!(!text.contains("fsite editors"));
         assert!(!text.contains("fsite source"));
+    }
+
+    #[test]
+    fn publish_static_site_workflow_guides_agents_to_git_deploy_bytes() {
+        let value = describe_workflow("publish-static-site").unwrap();
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(text.contains("A Project Repository is the editable git source of truth"));
+        assert!(text.contains("For static sites, Finite serves only committed bytes"));
+        assert!(text.contains("Do not look for a direct publish/upload command"));
+        assert!(text.contains("\"path\":\"site\""));
+        assert!(text.contains("fsite auth git PROJECT --store --output json"));
+    }
+
+    #[test]
+    fn old_site_first_commands_point_to_project_repository_workflow() {
+        assert!(matches!(
+            run(&args(&["publish"])),
+            Err(CliError::Usage(message))
+                if message.contains("not part of the current Project Repository model")
+                    && message.contains("fsite describe workflow publish-static-site --output json")
+                    && message.contains("Deploy Branch")
+        ));
+        assert!(matches!(
+            run(&args(&["publish-app"])),
+            Err(CliError::Usage(message))
+                if message.contains("not part of the current Project Repository model")
+                    && message.contains("does not upload arbitrary local files directly")
+        ));
     }
 
     #[test]

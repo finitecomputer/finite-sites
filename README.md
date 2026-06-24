@@ -122,7 +122,9 @@ website, PDF, or other output only when there is something useful to present.
 The deployed site is a Deploy Output: committed bytes selected from the
 Project Repository by `finite.toml` and served as a Version. Finite Sites
 validates and serves committed bytes; agents own any build step that produces
-those bytes.
+those bytes. Use a dedicated output directory such as `site/` or `dist/` for
+generated static files unless the whole Project Repository is intentionally a
+deploy-only tree.
 
 ## Collaborative editing
 
@@ -130,6 +132,7 @@ Project Repositories are the preferred collaboration path. Create or update
 the Project and its site output through agent-safe JSON:
 
 ```sh
+fsite describe workflow publish-static-site --output json
 fsite describe workflow project-config --output json
 fsite project apply --json project.json --dry-run --output json
 fsite project apply --json project.json --send-invite --output json
@@ -188,6 +191,10 @@ fsite share finitechat-native-mockup --remove-email editor@example.com
 Pushing to a Project Deploy Branch updates committed output bytes; Finite
 Sites does not run builds.
 
+There is no direct static bundle upload command in the current model. If an
+agent reaches for one, use `fsite describe workflow publish-static-site
+--output json` and then commit/push the selected output path.
+
 Owners can also email a view invite for a Project Output. This is separate
 from Project Repository edit access:
 
@@ -207,6 +214,9 @@ Agents should be able to learn `fsite` by interrogating `fsite` itself. Every
 capability exposed by the CLI should be discoverable through machine-readable
 help or describe commands, and every mutating project command should support
 structured JSON input, structured JSON output, and dry-run validation.
+`fsite --help` must point agents at the static-site happy path, and
+`fsite describe workflow publish-static-site --output json` is the canonical
+first command for creating a new static site Project Output.
 
 Human-friendly commands remain useful, but they should be thin convenience
 paths over the same agent-safe operations.

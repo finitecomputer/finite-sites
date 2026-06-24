@@ -79,6 +79,9 @@ implementation stay focused.
   Collaborators, Project Outputs, and Git Credentials.
 - `fsite project apply --json ... --dry-run --output json` creates a Project
   with one site output.
+- `fsite describe workflow publish-static-site --output json` gives agents
+  the static-site happy path before they guess at removed direct publish
+  commands.
 - `fsite describe workflow project-config --output json` documents the
   `finite.toml` schema and example configs.
 - `fsite auth git PROJECT [--email EMAIL] --store --output json` mints a scoped HTTPS

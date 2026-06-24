@@ -5,8 +5,14 @@ active Version did not publish that path itself.
 
 The file is platform guidance for agents. It explains that the output is backed
 by a Project Repository, names the Project slug and Git Remote, points to
-`fsite auth git PROJECT [--email EMAIL] --store --output json`, and tells agents to clone,
-edit source/deploy bytes, commit, and push the configured Deploy Branch.
+`fsite describe workflow edit-shared-project --output json` and
+`fsite auth git PROJECT [--email EMAIL] --store --output json`, and tells
+agents to clone, edit source/deploy bytes, commit, and push the configured
+Deploy Branch.
+
+Generated handoff should also state that there is no direct upload command in
+the current model. Agents publish by pushing git commits whose `finite.toml`
+selects the served output path.
 
 If a Project Output publishes its own `/llms.txt`, the authored file wins and
 the platform does not synthesize one. Project-authored instructions are the
