@@ -126,6 +126,11 @@ those bytes. Use a dedicated output directory such as `site/` or `dist/` for
 generated static files unless the whole Project Repository is intentionally a
 deploy-only tree.
 
+The Project Repository is still the whole shared source tree. Authorized
+Project Collaborators and their agents clone source, data, docs, logic, and
+deploy outputs from git. `finite.toml` only decides what subset becomes the
+website surface for viewers.
+
 ## Collaborative editing
 
 Project Repositories are the preferred collaboration path. Create or update
@@ -194,6 +199,9 @@ Sites does not run builds.
 There is no direct static bundle upload command in the current model. If an
 agent reaches for one, use `fsite describe workflow publish-static-site
 --output json` and then commit/push the selected output path.
+Commit the surrounding source tree too when collaborators need it; keeping
+source out of the website output path does not mean keeping it out of the
+Project Repository.
 
 Owners can also email a view invite for a Project Output. This is separate
 from Project Repository edit access:

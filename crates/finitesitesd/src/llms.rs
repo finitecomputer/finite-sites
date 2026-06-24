@@ -41,6 +41,8 @@ pub fn generated_project_llms_txt(
 
 This site is a Project Output from a Finite Project Repository. Use these instructions when a human asks you to make a change to this site.
 
+Authorized Project Collaborators clone and edit the whole Project Repository source tree. The served website is only the Project Output path selected by finite.toml.
+
 Site name: {site_name}
 Site URL: {site_url}
 Project: {project_slug}
@@ -86,7 +88,7 @@ Make the requested change:
 
 # inspect finite.toml to confirm the output path and Deploy Branch
 # only files under {output_path} are served for this output
-# edit source/data/logic as needed
+# edit source/data/logic as needed; keep shared source in the repository
 # run the project's tests and build command when discoverable
 # ensure committed deploy bytes exist at {output_path}
 git status
@@ -98,6 +100,7 @@ Rules:
 
 - Do not reconstruct source from rendered HTML. Use the Project Repository.
 - Do not look for a direct upload command; publish by pushing git commits.
+- Do commit source/data/build files that collaborators and agents need.
 - Finite Sites does not run builds; run builds yourself and commit the resulting deploy bytes.
 - Preserve a user-authored llms.txt if the project contains one.
 - Never commit `.finite/`, `.env*`, private keys, dependency directories, or build caches.
@@ -124,6 +127,7 @@ mod tests {
         );
 
         assert!(text.contains("Project: demo-project"));
+        assert!(text.contains("clone and edit the whole Project Repository source tree"));
         assert!(text.contains(
             "fsite auth git demo-project --email YOUR_EDITOR_EMAIL --store --output json"
         ));
@@ -132,6 +136,7 @@ mod tests {
         assert!(text.contains("git clone https://git.finite.chat/demo-project.git"));
         assert!(text.contains("git push origin main"));
         assert!(text.contains("only files under dist are served for this output"));
+        assert!(text.contains("Do commit source/data/build files"));
         assert!(text.contains("Do not look for a direct upload command"));
         assert!(!text.contains("export FINITE_SITES_API"));
         assert!(!text.contains("fsite source pull"));

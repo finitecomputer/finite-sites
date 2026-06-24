@@ -120,9 +120,10 @@ fn no_args_or_help(
 }
 
 fn usage() -> String {
-    "Finite Sites publishes committed files from a Project Repository. The \
-     Project's finite.toml selects the output path that becomes public; source \
-     outside that path stays in the private Project Repository.\n\n\
+    "Finite Sites shares the whole source tree through a Project Repository \
+     for authorized collaborators. The Project's finite.toml selects which \
+     committed path becomes the served website; source outside that path is \
+     cloneable by collaborators but not served as ordinary web assets.\n\n\
      Agent quick start for a static site:\n  \
      fsite describe workflow publish-static-site --output json\n  \
      fsite project apply --json project.json --dry-run --output json\n  \
@@ -311,22 +312,24 @@ fn publish_static_site_workflow() -> serde_json::Value {
     serde_json::json!({
         "name": "publish-static-site",
         "mental_model": [
-            "A Project Repository is the editable git source of truth.",
+            "A Project Repository is the editable git source of truth; authorized collaborators clone the whole source tree.",
             "A Project Output is what Finite serves to users.",
             "finite.toml selects the committed output path for each Project Output.",
-            "For static sites, Finite serves only committed bytes under that configured path.",
+            "For static sites, Finite serves only committed bytes under that configured path as the website.",
+            "Source, data, docs, and build logic can live outside the served output path and still be available to collaborators over git.",
             "Finite Sites does not run builds and does not accept direct file uploads in the current model."
         ],
         "steps": [
-            "Put generated static files in a dedicated output directory such as site/ unless the repository is deploy-only.",
+            "Keep the whole project source tree in the Project Repository.",
+            "Put generated static website files in a dedicated output directory such as site/ unless the repository is deploy-only.",
             "Create project apply JSON with project.slug, one output with kind=site, site_name, branch=main, path=site, and spa=false unless the app needs SPA fallback.",
             "Run fsite project apply --json project.json --dry-run --output json and read any validation error.",
             "After human confirmation, run fsite project apply --json project.json --send-invite --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
             "Clone the returned git_remote_url.",
-            "Copy/keep finite.toml and the selected output path in the Project Repository. Source, data, and build scripts may also live in the repo, but only the output path is served.",
+            "Keep finite.toml, the selected output path, and any source/data/build files collaborators need in the Project Repository. Only the output path is served as the website.",
             "Run the project build/tests locally if there is a build step.",
-            "Commit finite.toml plus the selected output path.",
+            "Commit finite.toml, the selected output path, and the source files that should be shared with collaborators.",
             "Push the configured Deploy Branch. Finite Sites validates committed bytes and creates a Version."
         ],
         "must_not": [
@@ -1213,8 +1216,8 @@ mod tests {
     #[test]
     fn top_level_usage_is_project_first() {
         let text = usage();
-        assert!(text.contains("publishes committed files from a Project Repository"));
-        assert!(text.contains("source outside that path stays in the private Project Repository"));
+        assert!(text.contains("shares the whole source tree through a Project Repository"));
+        assert!(text.contains("cloneable by collaborators but not served as ordinary web assets"));
         assert!(text.contains("fsite describe workflow publish-static-site --output json"));
         assert!(text.contains("fsite project apply"));
         assert!(text.contains("fsite auth git"));
@@ -1230,8 +1233,9 @@ mod tests {
     fn publish_static_site_workflow_guides_agents_to_git_deploy_bytes() {
         let value = describe_workflow("publish-static-site").unwrap();
         let text = serde_json::to_string(&value).unwrap();
-        assert!(text.contains("A Project Repository is the editable git source of truth"));
+        assert!(text.contains("authorized collaborators clone the whole source tree"));
         assert!(text.contains("For static sites, Finite serves only committed bytes"));
+        assert!(text.contains("Source, data, docs, and build logic can live outside"));
         assert!(text.contains("Do not look for a direct publish/upload command"));
         assert!(text.contains("\"path\":\"site\""));
         assert!(text.contains("fsite auth git PROJECT --store --output json"));

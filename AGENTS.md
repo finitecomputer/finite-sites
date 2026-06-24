@@ -50,6 +50,9 @@ git clone https://git.finite.chat/PROJECT.git
   does not run builds.
 - There is no direct bundle upload command. For static sites, commit the
   selected `finite.toml` output path, then push.
+- Commit the whole source tree that collaborators and agents need. The
+  Project Repository is the shared source; `finite.toml` only selects what is
+  served as the website.
 - Do not reconstruct source from rendered HTML. Use the Project Repository.
 - A generated `/llms.txt` is platform guidance only. If a project publishes
   its own `/llms.txt`, preserve it and treat it as the project's authority.

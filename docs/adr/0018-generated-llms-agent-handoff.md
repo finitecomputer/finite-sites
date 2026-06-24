@@ -14,6 +14,10 @@ Generated handoff should also state that there is no direct upload command in
 the current model. Agents publish by pushing git commits whose `finite.toml`
 selects the served output path.
 
+This must not imply that agents should omit source files. The Project
+Repository is the whole shared source tree for authorized collaborators; the
+output path only controls what viewers receive as website assets.
+
 If a Project Output publishes its own `/llms.txt`, the authored file wins and
 the platform does not synthesize one. Project-authored instructions are the
 project authority.
