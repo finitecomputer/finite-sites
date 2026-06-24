@@ -8,7 +8,7 @@
 mod cookie;
 mod email;
 
-pub use cookie::ViewerCookie;
+pub use cookie::{ViewerCookie, ViewerCookieSubject};
 pub use email::validate_email;
 
 use thiserror::Error;
@@ -20,10 +20,11 @@ use finitesites_proto::dto::{
 };
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_EMAIL_KEYS_PER_EMAIL, MAX_EMAILS_PER_SHARING_REQUEST,
-    MAX_FILE_BYTES, MAX_PROJECT_COLLABORATORS, MAX_SHARES_PER_SITE, VIEWER_COOKIE_TTL_SECONDS,
+    MAX_FILE_BYTES, MAX_PROJECT_COLLABORATORS, MAX_SHARES_PER_SITE, NIP98_MAX_SKEW_SECONDS,
+    VIEWER_COOKIE_TTL_SECONDS,
 };
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
-use finitesites_proto::{ManifestFile, ProtoError, PublishManifest, hex, ids, names};
+use finitesites_proto::{ManifestFile, ProtoError, PublishManifest, hex, ids, names, npub};
 use finitesites_store::{
     GitRefEventRecord, ProjectApplyStoreOutcome, ProjectCollaboratorApply, ProjectCollaboratorRole,
     ProjectOutputApply, ProjectOutputRecord, ProjectRecord, SiteKind, SiteRecord, SiteStatus,
@@ -701,7 +702,7 @@ impl Engine {
 
     // ---- sharing -------------------------------------------------------------
 
-    /// Update visibility and the shared-email ACL. Project collaborators edit
+    /// Update visibility and the Principal-backed viewer ACL. Project collaborators edit
     /// content through git; output visibility remains owner-controlled.
     pub fn set_sharing(
         &mut self,
@@ -717,9 +718,14 @@ impl Engine {
         if actor_pubkey != site.owner_pubkey {
             return Err(EngineError::NotAuthorized);
         }
-        let adds = request.add_emails.len() + request.remove_emails.len();
+        let adds = request.add_emails.len()
+            + request.remove_emails.len()
+            + request.add_pubkeys.len()
+            + request.remove_pubkeys.len();
         if adds > MAX_EMAILS_PER_SHARING_REQUEST as usize {
-            return Err(EngineError::Validation("too many emails in one request"));
+            return Err(EngineError::Validation(
+                "too many sharing changes in one request",
+            ));
         }
 
         let target_visibility = match request.visibility.as_deref() {
@@ -743,12 +749,23 @@ impl Engine {
             let normalized = validate_email(email)?;
             self.store.remove_share(&site.id, &normalized)?;
         }
+        for pubkey in &request.remove_pubkeys {
+            let normalized = npub::pubkey_from_hex_or_npub(pubkey)?;
+            self.store.remove_native_share(&site.id, &normalized)?;
+        }
         for email in &request.add_emails {
             let normalized = validate_email(email)?;
             if self.store.count_shares(&site.id)? >= MAX_SHARES_PER_SITE {
                 return Err(EngineError::TooManyShares);
             }
             self.store.add_share(&site.id, &normalized, now)?;
+        }
+        for pubkey in &request.add_pubkeys {
+            let normalized = npub::pubkey_from_hex_or_npub(pubkey)?;
+            if self.store.count_shares(&site.id)? >= MAX_SHARES_PER_SITE {
+                return Err(EngineError::TooManyShares);
+            }
+            self.store.add_native_share(&site.id, &normalized, now)?;
         }
         if let Some(visibility) = target_visibility {
             self.store.set_visibility(&site.id, visibility, now)?;
@@ -765,6 +782,7 @@ impl Engine {
         Ok(SharingResponse {
             visibility: refreshed.visibility.as_str().to_string(),
             shared_emails: self.store.shares(&site.id)?,
+            shared_pubkeys: self.store.native_shares(&site.id)?,
             invited_emails: Vec::new(),
         })
     }
@@ -861,6 +879,7 @@ impl Engine {
             kind: site.kind.as_str().to_string(),
             active_version: site.active_version_number,
             shared_emails: self.store.shares(&site.id)?,
+            shared_pubkeys: self.store.native_shares(&site.id)?,
         })
     }
 
@@ -897,7 +916,16 @@ impl Engine {
                 else {
                     return Ok(ViewAccess::NeedsLogin);
                 };
-                if self.store.is_email_shared(&site.id, &cookie.email)? {
+                let principal_id = match cookie.subject {
+                    ViewerCookieSubject::PrincipalId(principal_id) => Some(principal_id),
+                    ViewerCookieSubject::ExternalEmail(email) => self
+                        .store
+                        .principal_by_email(&email)?
+                        .map(|record| record.id),
+                };
+                if let Some(principal_id) = principal_id
+                    && self.store.is_principal_shared(&site.id, &principal_id)?
+                {
                     Ok(ViewAccess::Allowed)
                 } else {
                     Ok(ViewAccess::NeedsLogin)
@@ -1080,6 +1108,49 @@ impl Engine {
         }))
     }
 
+    // ---- native viewer auth -------------------------------------------------
+
+    pub fn native_viewer_session(
+        &mut self,
+        site: &SiteRecord,
+        signer_pubkey: &str,
+        nonce: &str,
+        now: u64,
+    ) -> Result<String, EngineError> {
+        if !hex::is_hex32(signer_pubkey) {
+            return Err(EngineError::NotAuthorized);
+        }
+        if site.status != SiteStatus::Published || site.visibility != Visibility::Shared {
+            return Err(EngineError::NotAuthorized);
+        }
+        let principal = self
+            .store
+            .principal_by_pubkey(signer_pubkey)?
+            .ok_or(EngineError::NotAuthorized)?;
+        if !self.store.is_principal_shared(&site.id, &principal.id)? {
+            return Err(EngineError::NotAuthorized);
+        }
+        match self.store.record_native_viewer_nonce(
+            &site.id,
+            signer_pubkey,
+            nonce,
+            now + NIP98_MAX_SKEW_SECONDS,
+            now,
+        ) {
+            Ok(()) => {}
+            Err(StoreError::Conflict("native viewer nonce replay")) => {
+                return Err(EngineError::Conflict("native viewer nonce replay"));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(ViewerCookie {
+            site_id: site.id.clone(),
+            subject: ViewerCookieSubject::PrincipalId(principal.id),
+            expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
+        }
+        .sign(&self.cookie_secret))
+    }
+
     // ---- magic-link login --------------------------------------------------------
 
     /// Issue a login token if (and only if) the email is shared on the site.
@@ -1151,9 +1222,15 @@ impl Engine {
             .ok_or(StoreError::CorruptState(
                 "login token references missing site",
             ))?;
+        let principal = self
+            .store
+            .principal_by_email(&email)?
+            .ok_or(StoreError::CorruptState(
+                "login token email principal missing",
+            ))?;
         let cookie = ViewerCookie {
             site_id,
-            email,
+            subject: ViewerCookieSubject::PrincipalId(principal.id),
             expires_at: now + VIEWER_COOKIE_TTL_SECONDS,
         }
         .sign(&self.cookie_secret);

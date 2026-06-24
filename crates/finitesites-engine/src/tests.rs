@@ -614,6 +614,8 @@ fn sharing_is_owner_controlled_and_public_requires_confirmation() {
         confirm_public: false,
         add_emails: vec!["Friend@Example.com".into()],
         remove_emails: vec![],
+        add_pubkeys: vec![],
+        remove_pubkeys: vec![],
     };
     let response = fx
         .engine
@@ -635,6 +637,8 @@ fn sharing_is_owner_controlled_and_public_requires_confirmation() {
         confirm_public: false,
         add_emails: vec![],
         remove_emails: vec![],
+        add_pubkeys: vec![],
+        remove_pubkeys: vec![],
     };
     let rejected = fx.engine.set_sharing(OWNER, "hello", &unconfirmed, NOW + 2);
     assert!(matches!(rejected, Err(EngineError::Validation(_))));
@@ -660,6 +664,8 @@ fn sharing_validates_emails_and_limits() {
         confirm_public: false,
         add_emails: vec!["not-an-email".into()],
         remove_emails: vec![],
+        add_pubkeys: vec![],
+        remove_pubkeys: vec![],
     };
     assert!(matches!(
         fx.engine.set_sharing(OWNER, "hello", &bad_email, NOW),
@@ -671,6 +677,8 @@ fn sharing_validates_emails_and_limits() {
         confirm_public: false,
         add_emails: (0..21).map(|i| format!("user{i}@example.com")).collect(),
         remove_emails: vec![],
+        add_pubkeys: vec![],
+        remove_pubkeys: vec![],
     };
     assert!(matches!(
         fx.engine
@@ -688,6 +696,8 @@ fn sharing_validates_emails_and_limits() {
                 .map(|i| format!("user{i}@example.com"))
                 .collect(),
             remove_emails: vec![],
+            add_pubkeys: vec![],
+            remove_pubkeys: vec![],
         };
         fx.engine.set_sharing(OWNER, "hello", &batch, NOW).unwrap();
         added = upper;
@@ -697,6 +707,8 @@ fn sharing_validates_emails_and_limits() {
         confirm_public: false,
         add_emails: vec!["overflow@example.com".into()],
         remove_emails: vec![],
+        add_pubkeys: vec![],
+        remove_pubkeys: vec![],
     };
     assert!(matches!(
         fx.engine.set_sharing(OWNER, "hello", &over_cap, NOW),
@@ -719,6 +731,8 @@ fn shared_site_full_magic_link_flow() {
                 confirm_public: false,
                 add_emails: vec!["friend@example.com".into()],
                 remove_emails: vec![],
+                add_pubkeys: vec![],
+                remove_pubkeys: vec![],
             },
             NOW,
         )
@@ -769,6 +783,8 @@ fn shared_site_full_magic_link_flow() {
                 confirm_public: false,
                 add_emails: vec![],
                 remove_emails: vec!["friend@example.com".into()],
+                add_pubkeys: vec![],
+                remove_pubkeys: vec![],
             },
             NOW,
         )
@@ -776,6 +792,75 @@ fn shared_site_full_magic_link_flow() {
     assert_eq!(
         fx.engine
             .view_access(&site, Some(&cookie), NOW + 180)
+            .unwrap(),
+        ViewAccess::NeedsLogin
+    );
+}
+
+#[test]
+fn native_principal_viewer_session_uses_share_table_and_nonce_replay_guard() {
+    let mut fx = fixture();
+    publish_project_site(&mut fx.engine, "hello-project", "hello", false);
+    let shared = fx
+        .engine
+        .set_sharing(
+            OWNER,
+            "hello",
+            &SharingRequest {
+                visibility: Some("shared".into()),
+                confirm_public: false,
+                add_emails: vec![],
+                remove_emails: vec![],
+                add_pubkeys: vec![OTHER_OWNER.into()],
+                remove_pubkeys: vec![],
+            },
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(shared.shared_pubkeys, vec![OTHER_OWNER.to_string()]);
+    let site = fx.engine.resolve_site("hello").unwrap().unwrap();
+
+    let owner_not_shared =
+        fx.engine
+            .native_viewer_session(&site, OWNER, "owner-nonce-123456", NOW + 1);
+    assert!(matches!(owner_not_shared, Err(EngineError::NotAuthorized)));
+
+    let cookie = fx
+        .engine
+        .native_viewer_session(&site, OTHER_OWNER, "viewer-nonce-123456", NOW + 2)
+        .unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&cookie), NOW + 3)
+            .unwrap(),
+        ViewAccess::Allowed
+    );
+    let replay =
+        fx.engine
+            .native_viewer_session(&site, OTHER_OWNER, "viewer-nonce-123456", NOW + 4);
+    assert!(matches!(
+        replay,
+        Err(EngineError::Conflict("native viewer nonce replay"))
+    ));
+
+    fx.engine
+        .set_sharing(
+            OWNER,
+            "hello",
+            &SharingRequest {
+                visibility: None,
+                confirm_public: false,
+                add_emails: vec![],
+                remove_emails: vec![],
+                add_pubkeys: vec![],
+                remove_pubkeys: vec![OTHER_OWNER.into()],
+            },
+            NOW + 5,
+        )
+        .unwrap();
+    assert_eq!(
+        fx.engine
+            .view_access(&site, Some(&cookie), NOW + 6)
             .unwrap(),
         ViewAccess::NeedsLogin
     );
@@ -817,6 +902,8 @@ fn public_private_and_unpublished_view_paths() {
                 confirm_public: true,
                 add_emails: vec![],
                 remove_emails: vec![],
+                add_pubkeys: vec![],
+                remove_pubkeys: vec![],
             },
             NOW + 3,
         )
@@ -841,6 +928,8 @@ fn login_tokens_expire_and_reject_malformed_values() {
                 confirm_public: false,
                 add_emails: vec!["friend@example.com".into()],
                 remove_emails: vec![],
+                add_pubkeys: vec![],
+                remove_pubkeys: vec![],
             },
             NOW,
         )

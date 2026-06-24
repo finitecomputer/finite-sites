@@ -463,6 +463,7 @@ impl Store {
         )?;
         Self::migrate_legacy_sites_shape(&conn)?;
         Self::migrate_legacy_allowed_pubkeys(&conn)?;
+        Self::migrate_principal_shares(&conn)?;
         Ok(Store { conn })
     }
 
@@ -582,6 +583,76 @@ impl Store {
              FROM allowed_pubkeys",
             [],
         )?;
+        Ok(())
+    }
+
+    fn migrate_principal_shares(conn: &Connection) -> Result<(), StoreError> {
+        let columns = Self::table_column_names(conn, "shares")?;
+        if columns.iter().any(|column| column == "principal_id") {
+            return Ok(());
+        }
+        if !columns.iter().any(|column| column == "email") {
+            return Err(StoreError::CorruptState(
+                "shares table has neither principal_id nor email",
+            ));
+        }
+
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
+        let result: Result<(), StoreError> = (|| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE shares_new (
+                   site_id TEXT NOT NULL REFERENCES sites(id),
+                   principal_id TEXT NOT NULL REFERENCES principals(id),
+                   created_at INTEGER NOT NULL,
+                   PRIMARY KEY (site_id, principal_id)
+                 );",
+            )?;
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT site_id, email, created_at FROM shares ORDER BY site_id, email",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? as u64,
+                    ))
+                })?;
+                // Bounded by the old share table size.
+                for row in rows {
+                    let (site_id, email, created_at) = row?;
+                    let principal_id = ensure_external_principal(
+                        &tx,
+                        &email,
+                        ids::new_id(ids::PRINCIPAL_ID_PREFIX),
+                        created_at,
+                    )?;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO shares_new (site_id, principal_id, created_at)
+                         VALUES (?1, ?2, ?3)",
+                        params![site_id, principal_id, created_at],
+                    )?;
+                }
+            }
+            tx.execute_batch(
+                "DROP TABLE shares;
+                 ALTER TABLE shares_new RENAME TO shares;",
+            )?;
+            tx.commit()?;
+            Ok(())
+        })();
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        result?;
+        let violations: i64 =
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if violations > 0 {
+            return Err(StoreError::CorruptState(
+                "foreign key violation after shares migration",
+            ));
+        }
         Ok(())
     }
 
@@ -1931,25 +2002,85 @@ impl Store {
     }
 
     pub fn add_share(&mut self, site_id: &str, email: &str, now: u64) -> Result<(), StoreError> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO shares (site_id, email, created_at) VALUES (?1, ?2, ?3)",
-            params![site_id, email, now],
+        let tx = self.conn.transaction()?;
+        let principal_id =
+            ensure_external_principal(&tx, email, ids::new_id(ids::PRINCIPAL_ID_PREFIX), now)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO shares (site_id, principal_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![site_id, principal_id, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn remove_share(&mut self, site_id: &str, email: &str) -> Result<(), StoreError> {
         self.conn.execute(
-            "DELETE FROM shares WHERE site_id = ?1 AND email = ?2",
+            "DELETE FROM shares
+             WHERE site_id = ?1
+               AND principal_id IN (SELECT id FROM principals WHERE email = ?2)",
             params![site_id, email],
         )?;
         Ok(())
     }
 
+    pub fn add_native_share(
+        &mut self,
+        site_id: &str,
+        pubkey: &str,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        assert!(pubkey.len() == 64);
+        let tx = self.conn.transaction()?;
+        let principal_id =
+            ensure_native_principal(&tx, pubkey, ids::new_id(ids::PRINCIPAL_ID_PREFIX), now)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO shares (site_id, principal_id, created_at)
+             VALUES (?1, ?2, ?3)",
+            params![site_id, principal_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_native_share(&mut self, site_id: &str, pubkey: &str) -> Result<(), StoreError> {
+        assert!(pubkey.len() == 64);
+        self.conn.execute(
+            "DELETE FROM shares
+             WHERE site_id = ?1
+               AND principal_id IN (SELECT id FROM principals WHERE pubkey = ?2)",
+            params![site_id, pubkey],
+        )?;
+        Ok(())
+    }
+
     pub fn shares(&self, site_id: &str) -> Result<Vec<String>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT email FROM shares WHERE site_id = ?1 ORDER BY email")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT p.email
+                 FROM shares s
+                 JOIN principals p ON p.id = s.principal_id
+                 WHERE s.site_id = ?1
+                   AND p.kind = 'external'
+                 ORDER BY p.email",
+        )?;
+        let rows = stmt.query_map(params![site_id], |row| row.get(0))?;
+        let mut out = Vec::new();
+        // Bounded by MAX_SHARES_PER_SITE, enforced at share time.
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn native_shares(&self, site_id: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.pubkey
+             FROM shares s
+             JOIN principals p ON p.id = s.principal_id
+             WHERE s.site_id = ?1
+               AND p.kind = 'native'
+             ORDER BY p.pubkey",
+        )?;
         let rows = stmt.query_map(params![site_id], |row| row.get(0))?;
         let mut out = Vec::new();
         // Bounded by MAX_SHARES_PER_SITE, enforced at share time.
@@ -1972,12 +2103,57 @@ impl Store {
         let found: Option<i64> = self
             .conn
             .query_row(
-                "SELECT 1 FROM shares WHERE site_id = ?1 AND email = ?2",
+                "SELECT 1
+                 FROM shares s
+                 JOIN principals p ON p.id = s.principal_id
+                 WHERE s.site_id = ?1
+                   AND p.email = ?2",
                 params![site_id, email],
                 |row| row.get(0),
             )
             .optional()?;
         Ok(found.is_some())
+    }
+
+    pub fn is_principal_shared(
+        &self,
+        site_id: &str,
+        principal_id: &str,
+    ) -> Result<bool, StoreError> {
+        let found: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM shares WHERE site_id = ?1 AND principal_id = ?2",
+                params![site_id, principal_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    pub fn record_native_viewer_nonce(
+        &mut self,
+        site_id: &str,
+        pubkey: &str,
+        nonce: &str,
+        expires_at: u64,
+        now: u64,
+    ) -> Result<(), StoreError> {
+        assert!(pubkey.len() == 64);
+        assert!(expires_at > now);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM native_viewer_nonces WHERE expires_at <= ?1",
+            params![now],
+        )?;
+        tx.execute(
+            "INSERT INTO native_viewer_nonces (site_id, pubkey, nonce, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![site_id, pubkey, nonce, now, expires_at],
+        )
+        .map_err(|error| map_unique_violation(error, "native viewer nonce replay"))?;
+        tx.commit()?;
+        Ok(())
     }
 
     // ---- email keys -------------------------------------------------------
@@ -2770,14 +2946,51 @@ mod tests {
         store.add_share("site_1", "a@example.com", NOW).unwrap();
         store.add_share("site_1", "a@example.com", NOW).unwrap();
         store.add_share("site_1", "b@example.com", NOW).unwrap();
-        assert_eq!(store.count_shares("site_1").unwrap(), 2);
+        store.add_native_share("site_1", OTHER_KEY, NOW).unwrap();
+        store.add_native_share("site_1", OTHER_KEY, NOW).unwrap();
+        assert_eq!(store.count_shares("site_1").unwrap(), 3);
         assert!(store.is_email_shared("site_1", "a@example.com").unwrap());
+        let native_principal = store.principal_by_pubkey(OTHER_KEY).unwrap().unwrap();
+        assert!(
+            store
+                .is_principal_shared("site_1", &native_principal.id)
+                .unwrap()
+        );
         store.remove_share("site_1", "a@example.com").unwrap();
         assert!(!store.is_email_shared("site_1", "a@example.com").unwrap());
+        store.remove_native_share("site_1", OTHER_KEY).unwrap();
         assert_eq!(store.shares("site_1").unwrap(), vec!["b@example.com"]);
+        assert!(store.native_shares("site_1").unwrap().is_empty());
 
         let missing = store.set_visibility("site_unknown", Visibility::Public, NOW);
         assert!(matches!(missing, Err(StoreError::NotFound("site"))));
+    }
+
+    #[test]
+    fn native_viewer_nonces_reject_replay_until_expiry() {
+        let mut store = store_with_site("hello");
+        store
+            .record_native_viewer_nonce("site_1", OTHER_KEY, "nonce-1234567890", NOW + 60, NOW)
+            .unwrap();
+        assert!(matches!(
+            store.record_native_viewer_nonce(
+                "site_1",
+                OTHER_KEY,
+                "nonce-1234567890",
+                NOW + 61,
+                NOW + 1
+            ),
+            Err(StoreError::Conflict("native viewer nonce replay"))
+        ));
+        store
+            .record_native_viewer_nonce(
+                "site_1",
+                OTHER_KEY,
+                "nonce-1234567890",
+                NOW + 130,
+                NOW + 61,
+            )
+            .unwrap();
     }
 
     #[test]

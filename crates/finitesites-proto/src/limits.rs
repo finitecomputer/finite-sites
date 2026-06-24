@@ -22,7 +22,7 @@ pub const MAX_PATH_BYTES: u32 = 512;
 /// users get "unlimited within reason"; this is the reason.
 pub const MAX_SITES_PER_OWNER: u32 = 100;
 
-/// One site may be shared with at most this many emails. Sharing is
+/// One site may be shared with at most this many Principals. Sharing is
 /// Google-Doc-shaped (a few collaborators), not a mailing list.
 pub const MAX_SHARES_PER_SITE: u32 = 50;
 
@@ -66,8 +66,24 @@ pub const MAX_GIT_REF_UPDATES_PER_PUSH: u32 = 128;
 /// branch/tag paths while rejecting unbounded strings from hook input.
 pub const MAX_GIT_REF_NAME_BYTES: u32 = 256;
 
-/// Sharing mutations may add or remove at most this many emails per request.
+/// Sharing mutations may add or remove at most this many Principals per request.
 pub const MAX_EMAILS_PER_SHARING_REQUEST: u32 = 20;
+
+/// Native viewer auth is one small JSON challenge request. It carries a
+/// return path, a client id, and a nonce, not page content.
+pub const MAX_NATIVE_VIEWER_AUTH_BODY_BYTES: u64 = 4 * 1024;
+
+/// Native viewer auth return paths redirect within one site host only.
+pub const MAX_NATIVE_VIEWER_RETURN_TO_BYTES: u32 = 1024;
+
+/// Native viewer auth nonces are client-random printable tokens. The lower
+/// bound avoids useless empty challenges; the upper bound keeps replay keys
+/// compact.
+pub const MIN_NATIVE_VIEWER_NONCE_BYTES: u32 = 16;
+pub const MAX_NATIVE_VIEWER_NONCE_BYTES: u32 = 128;
+
+/// Native viewer auth client ids are diagnostic labels, not a registry.
+pub const MAX_NATIVE_VIEWER_CLIENT_BYTES: u32 = 64;
 
 /// A claim or auth header is rejected above this size before any parsing.
 pub const MAX_AUTH_HEADER_BYTES: u32 = 8 * 1024;

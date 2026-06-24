@@ -3,7 +3,7 @@
 Viewing a shared site works like a Google Doc: enter your email on the
 site's own login page, click the mailed link, get a cookie. Tokens are
 single-use and expire in 15 minutes; cookies are HMAC-signed
-`(site, email, expiry)` triples set on the site's host only, and the share
+`(site, Principal, expiry)` triples set on the site's host only, and the share
 table is re-checked on every request so revocation is immediate. The
 login endpoint answers identically whether or not the email has access.
 

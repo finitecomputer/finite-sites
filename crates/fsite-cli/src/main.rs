@@ -1151,6 +1151,8 @@ fn share(args: &[String]) -> Result<(), CliError> {
         confirm_public,
         add_emails,
         remove_emails,
+        add_pubkeys: vec![],
+        remove_pubkeys: vec![],
     };
     let identity = keys::load_or_create_identity()?;
     let response = client.set_sharing(&identity, name, &request, send_invites)?;

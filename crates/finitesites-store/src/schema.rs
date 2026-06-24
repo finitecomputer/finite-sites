@@ -228,9 +228,19 @@ CREATE TABLE IF NOT EXISTS blobs (
 
 CREATE TABLE IF NOT EXISTS shares (
   site_id TEXT NOT NULL REFERENCES sites(id),
-  email TEXT NOT NULL,
+  principal_id TEXT NOT NULL REFERENCES principals(id),
   created_at INTEGER NOT NULL,
-  PRIMARY KEY (site_id, email)
+  PRIMARY KEY (site_id, principal_id)
+);
+
+CREATE TABLE IF NOT EXISTS native_viewer_nonces (
+  site_id TEXT NOT NULL REFERENCES sites(id),
+  pubkey TEXT NOT NULL CHECK (length(pubkey) = 64),
+  nonce TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (site_id, pubkey, nonce),
+  CHECK (expires_at > created_at)
 );
 
 CREATE TABLE IF NOT EXISTS email_keys (

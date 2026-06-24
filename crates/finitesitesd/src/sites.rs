@@ -8,18 +8,25 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Form, Query, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION, SET_COOKIE,
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION,
+    SET_COOKIE,
 };
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 
 use finitesites_engine::{EngineError, ViewAccess};
-use finitesites_proto::limits::VIEWER_COOKIE_TTL_SECONDS;
+use finitesites_proto::dto::NativeViewerSessionRequest;
+use finitesites_proto::limits::{
+    MAX_NATIVE_VIEWER_AUTH_BODY_BYTES, MAX_NATIVE_VIEWER_CLIENT_BYTES,
+    MAX_NATIVE_VIEWER_NONCE_BYTES, MAX_NATIVE_VIEWER_RETURN_TO_BYTES,
+    MIN_NATIVE_VIEWER_NONCE_BYTES, VIEWER_COOKIE_TTL_SECONDS,
+};
+use finitesites_proto::nip98;
 use finitesites_store::{SiteKind, SiteRecord, SiteStatus};
 
 use crate::content_type::content_type_for_path;
@@ -32,6 +39,7 @@ const VIEWER_COOKIE_NAME: &str = "finite_site_auth";
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/_finite/auth", get(redeem_link))
+        .route("/_finite/auth/native-session", post(native_session))
         .route("/_finite/request-link", post(request_link))
         .route("/_finite/logout", get(logout))
         // Any method: app sites proxy POST/PUT/etc.; static handling
@@ -85,6 +93,10 @@ fn html_response(status: StatusCode, body: String) -> Response {
 
 fn internal_page() -> Response {
     html_response(StatusCode::INTERNAL_SERVER_ERROR, pages::not_found())
+}
+
+fn bad_request_page() -> Response {
+    html_response(StatusCode::BAD_REQUEST, pages::link_invalid())
 }
 
 fn generated_llms_response(body: String, method: &Method) -> Response {
@@ -460,6 +472,120 @@ async fn request_link(
     html_response(StatusCode::OK, pages::link_sent())
 }
 
+// ---- native viewer auth ------------------------------------------------------
+
+async fn native_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    if body.len() as u64 > MAX_NATIVE_VIEWER_AUTH_BODY_BYTES {
+        return bad_request_page();
+    }
+    let site = match resolve_request_site(&state, &headers) {
+        Ok(Some(site)) => site,
+        Ok(None) => return html_response(StatusCode::NOT_FOUND, pages::unknown_site()),
+        Err(error) => {
+            eprintln!("finitesitesd native auth site error: {error}");
+            return internal_page();
+        }
+    };
+    let Some(expected_url) = absolute_site_request_url(&state, &headers, &uri) else {
+        return bad_request_page();
+    };
+    let Some(auth_header) = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return html_response(StatusCode::UNAUTHORIZED, pages::link_invalid());
+    };
+    let now = now_unix();
+    let signer_pubkey =
+        match nip98::verify_auth_header(auth_header, &expected_url, "POST", Some(&body), now) {
+            Ok(pubkey) => pubkey,
+            Err(_) => return html_response(StatusCode::UNAUTHORIZED, pages::link_invalid()),
+        };
+    let request: NativeViewerSessionRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return bad_request_page(),
+    };
+    if !valid_native_viewer_session_request(&request) {
+        return bad_request_page();
+    }
+    let cookie_value = {
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine.native_viewer_session(&site, &signer_pubkey, &request.nonce, now)
+    };
+    match cookie_value {
+        Ok(cookie_value) => {
+            let cookie = format!(
+                "{VIEWER_COOKIE_NAME}={cookie_value}; Path=/; Max-Age={VIEWER_COOKIE_TTL_SECONDS}; HttpOnly; SameSite=Lax"
+            );
+            Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header(LOCATION, request.return_to)
+                .header(SET_COOKIE, cookie)
+                .body(Body::empty())
+                .expect("static response builds")
+        }
+        Err(EngineError::NotAuthorized) => {
+            html_response(StatusCode::UNAUTHORIZED, pages::link_invalid())
+        }
+        Err(EngineError::Conflict("native viewer nonce replay")) => bad_request_page(),
+        Err(EngineError::Validation(_)) => bad_request_page(),
+        Err(error) => {
+            eprintln!("finitesitesd native auth error: {error}");
+            internal_page()
+        }
+    }
+}
+
+fn absolute_site_request_url(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    let host = headers.get(HOST)?.to_str().ok()?;
+    site_label(host, &state.base_domain)?;
+    let scheme = {
+        let engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine.config().site_url_scheme.clone()
+    };
+    let path_and_query = uri.path_and_query()?.as_str();
+    Some(format!("{scheme}://{host}{path_and_query}"))
+}
+
+fn valid_native_viewer_session_request(request: &NativeViewerSessionRequest) -> bool {
+    if request.purpose != "finite_site_view_session" {
+        return false;
+    }
+    valid_return_to(&request.return_to)
+        && valid_token_like(&request.client, 1, MAX_NATIVE_VIEWER_CLIENT_BYTES as usize)
+        && valid_token_like(
+            &request.nonce,
+            MIN_NATIVE_VIEWER_NONCE_BYTES as usize,
+            MAX_NATIVE_VIEWER_NONCE_BYTES as usize,
+        )
+}
+
+fn valid_return_to(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > MAX_NATIVE_VIEWER_RETURN_TO_BYTES as usize {
+        return false;
+    }
+    if !value.starts_with('/') || value.starts_with("//") {
+        return false;
+    }
+    !bytes.iter().any(|byte| byte.is_ascii_control())
+}
+
+fn valid_token_like(value: &str, min_len: usize, max_len: usize) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < min_len || bytes.len() > max_len {
+        return false;
+    }
+    bytes
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+}
+
 async fn redeem_link(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -519,7 +645,8 @@ async fn logout() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_request_path;
+    use super::{decode_request_path, valid_native_viewer_session_request};
+    use finitesites_proto::dto::NativeViewerSessionRequest;
 
     #[test]
     fn decode_request_path_rules() {
@@ -534,5 +661,34 @@ mod tests {
         assert_eq!(decode_request_path("/bad%zz"), None);
         assert_eq!(decode_request_path("/nul%00byte"), None);
         assert_eq!(decode_request_path("no-slash"), None);
+    }
+
+    #[test]
+    fn native_viewer_session_request_rules() {
+        let valid = NativeViewerSessionRequest {
+            purpose: "finite_site_view_session".into(),
+            return_to: "/shared/page?x=1".into(),
+            client: "finite-chat-ios".into(),
+            nonce: "abc1234567890abcdef".into(),
+        };
+        assert!(valid_native_viewer_session_request(&valid));
+
+        let mut wrong_purpose = valid.clone();
+        wrong_purpose.purpose = "other".into();
+        assert!(!valid_native_viewer_session_request(&wrong_purpose));
+
+        let mut external_redirect = valid.clone();
+        external_redirect.return_to = "https://evil.test/".into();
+        assert!(!valid_native_viewer_session_request(&external_redirect));
+
+        let mut scheme_relative_redirect = valid.clone();
+        scheme_relative_redirect.return_to = "//evil.test/".into();
+        assert!(!valid_native_viewer_session_request(
+            &scheme_relative_redirect
+        ));
+
+        let mut short_nonce = valid;
+        short_nonce.nonce = "short".into();
+        assert!(!valid_native_viewer_session_request(&short_nonce));
     }
 }

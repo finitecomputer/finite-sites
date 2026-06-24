@@ -16,9 +16,9 @@ use finitesites_blob::BlobStore;
 use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::dto::{
     EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest, EmailRedeemResponse, GitAuthRequest,
-    GitAuthResponse, ProjectApplyRequest, ProjectApplyResponse, ProjectCollaboratorRemoveRequest,
-    ProjectCollaboratorRemoveResponse, ProjectCollaboratorSpec, SharingRequest, SharingResponse,
-    SiteSummary,
+    GitAuthResponse, NativeViewerSessionRequest, ProjectApplyRequest, ProjectApplyResponse,
+    ProjectCollaboratorRemoveRequest, ProjectCollaboratorRemoveResponse, ProjectCollaboratorSpec,
+    SharingRequest, SharingResponse, SiteSummary,
 };
 use finitesites_proto::nip98;
 use finitesites_proto::project_config::{
@@ -165,6 +165,27 @@ impl TestServer {
         self.agent
             .get(&format!("http://{name}.{BASE_DOMAIN}:{port}{path}"))
             .call()
+    }
+
+    fn signed_site_post(
+        &self,
+        secret: &[u8; 32],
+        name: &str,
+        path: &str,
+        body: &[u8],
+        signed_url: Option<&str>,
+        signed_method: &str,
+    ) -> Result<ureq::Response, ureq::Error> {
+        let url = format!("http://{name}.{BASE_DOMAIN}:{}{path}", self.port());
+        let auth_url = signed_url.unwrap_or(&url);
+        let header =
+            nip98::build_auth_header(secret, auth_url, signed_method, Some(body), now_unix())
+                .unwrap();
+        self.agent
+            .post(&url)
+            .set("Authorization", &header)
+            .set("Content-Type", "application/json")
+            .send_bytes(body)
     }
 
     fn port(&self) -> u16 {
@@ -521,6 +542,8 @@ async fn full_publish_share_and_view_flow() {
             confirm_public: false,
             add_emails: vec!["friend@example.com".into()],
             remove_emails: vec![],
+            add_pubkeys: vec![],
+            remove_pubkeys: vec![],
         })
         .unwrap();
         let shared: SharingResponse = json_body(
@@ -623,6 +646,8 @@ async fn full_publish_share_and_view_flow() {
             confirm_public: true,
             add_emails: vec![],
             remove_emails: vec![],
+            add_pubkeys: vec![],
+            remove_pubkeys: vec![],
         })
         .unwrap();
         server
@@ -686,6 +711,8 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
             confirm_public: false,
             add_emails: vec!["Friend@Example.com".into()],
             remove_emails: vec![],
+            add_pubkeys: vec![],
+            remove_pubkeys: vec![],
         })
         .unwrap();
         let invalid_invite = server
@@ -716,6 +743,8 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
             confirm_public: false,
             add_emails: vec!["Friend@Example.com".into()],
             remove_emails: vec![],
+            add_pubkeys: vec![],
+            remove_pubkeys: vec![],
         })
         .unwrap();
         let shared: SharingResponse = json_body(
@@ -755,6 +784,181 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
         assert_eq!(replay.shared_emails, vec!["friend@example.com"]);
         assert_eq!(replay.invited_emails, vec!["friend@example.com"]);
         assert_eq!(outbox_bodies(&server.outbox).len(), 1);
+    });
+    task.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_viewer_auth_sets_cookie_without_email_or_relays() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let viewer_pubkey = finitesites_proto::event::pubkey_for_secret(&stranger_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let created: ProjectApplyResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/apply",
+                    Some(&body),
+                )
+                .unwrap(),
+        );
+        let credential = mint_skyler_git_credential(&server);
+        push_project_files(
+            &server,
+            &credential,
+            &created.finite_toml,
+            "main",
+            &[("index.html", "<h1>native auth</h1>")],
+            "Native auth deploy",
+        );
+        wait_for_active_version(&server, "finitechat-native-mockup", Some(1));
+
+        let share_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("shared".into()),
+            confirm_public: false,
+            add_emails: vec![],
+            remove_emails: vec![],
+            add_pubkeys: vec![viewer_pubkey.clone()],
+            remove_pubkeys: vec![],
+        })
+        .unwrap();
+        let shared: SharingResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/sites/finitechat-native-mockup/sharing",
+                    Some(&share_body),
+                )
+                .unwrap(),
+        );
+        assert!(shared.shared_emails.is_empty());
+        assert_eq!(shared.shared_pubkeys, vec![viewer_pubkey.clone()]);
+
+        let unauthenticated = server.site_get("finitechat-native-mockup", "/", port);
+        assert!(matches!(unauthenticated, Err(ureq::Error::Status(401, _))));
+
+        let request = NativeViewerSessionRequest {
+            purpose: "finite_site_view_session".into(),
+            return_to: "/".into(),
+            client: "finite-chat-ios".into(),
+            nonce: "native-nonce-0000001".into(),
+        };
+        let native_body = serde_json::to_vec(&request).unwrap();
+        let authed = server
+            .signed_site_post(
+                &stranger_secret(),
+                "finitechat-native-mockup",
+                "/_finite/auth/native-session",
+                &native_body,
+                None,
+                "POST",
+            )
+            .unwrap();
+        assert_eq!(authed.status(), 303);
+        assert_eq!(authed.header("location"), Some("/"));
+        let cookie = authed
+            .header("set-cookie")
+            .expect("native auth sets a cookie")
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let page = server
+            .agent
+            .get(&format!(
+                "http://finitechat-native-mockup.{BASE_DOMAIN}:{port}/"
+            ))
+            .set("Cookie", &cookie)
+            .call()
+            .unwrap();
+        assert!(page.into_string().unwrap().contains("native auth"));
+
+        let replay = server.signed_site_post(
+            &stranger_secret(),
+            "finitechat-native-mockup",
+            "/_finite/auth/native-session",
+            &native_body,
+            None,
+            "POST",
+        );
+        assert!(matches!(replay, Err(ureq::Error::Status(400, _))));
+
+        let wrong_url = server.signed_site_post(
+            &stranger_secret(),
+            "finitechat-native-mockup",
+            "/_finite/auth/native-session",
+            &native_body,
+            Some("http://evil.test/_finite/auth/native-session"),
+            "POST",
+        );
+        assert!(matches!(wrong_url, Err(ureq::Error::Status(401, _))));
+
+        let wrong_method = server.signed_site_post(
+            &stranger_secret(),
+            "finitechat-native-mockup",
+            "/_finite/auth/native-session",
+            &native_body,
+            None,
+            "GET",
+        );
+        assert!(matches!(wrong_method, Err(ureq::Error::Status(401, _))));
+
+        let url = format!(
+            "http://finitechat-native-mockup.{BASE_DOMAIN}:{port}/_finite/auth/native-session"
+        );
+        let header = nip98::build_auth_header(
+            &stranger_secret(),
+            &url,
+            "POST",
+            Some(&native_body),
+            now_unix(),
+        )
+        .unwrap();
+        let tampered = serde_json::to_vec(&NativeViewerSessionRequest {
+            nonce: "native-nonce-0000002".into(),
+            ..request.clone()
+        })
+        .unwrap();
+        let payload_mismatch = server
+            .agent
+            .post(&url)
+            .set("Authorization", &header)
+            .set("Content-Type", "application/json")
+            .send_bytes(&tampered);
+        assert!(matches!(payload_mismatch, Err(ureq::Error::Status(401, _))));
+
+        let unshared = server.signed_site_post(
+            &user_secret(),
+            "finitechat-native-mockup",
+            "/_finite/auth/native-session",
+            &native_body,
+            None,
+            "POST",
+        );
+        assert!(matches!(unshared, Err(ureq::Error::Status(401, _))));
+
+        let bad_return = serde_json::to_vec(&NativeViewerSessionRequest {
+            return_to: "https://evil.test/".into(),
+            nonce: "native-nonce-0000003".into(),
+            ..request
+        })
+        .unwrap();
+        let malformed = server.signed_site_post(
+            &stranger_secret(),
+            "finitechat-native-mockup",
+            "/_finite/auth/native-session",
+            &bad_return,
+            None,
+            "POST",
+        );
+        assert!(matches!(malformed, Err(ureq::Error::Status(400, _))));
     });
     task.await.unwrap();
 }
@@ -1675,6 +1879,8 @@ async fn generated_llms_txt_requires_project_output_and_respects_user_file() {
             confirm_public: true,
             add_emails: vec![],
             remove_emails: vec![],
+            add_pubkeys: vec![],
+            remove_pubkeys: vec![],
         })
         .unwrap();
         server

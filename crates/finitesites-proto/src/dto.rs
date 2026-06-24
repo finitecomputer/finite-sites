@@ -28,7 +28,7 @@ pub struct EmailRedeemResponse {
     pub pubkey: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SharingRequest {
     /// Target visibility: "private", "shared", or "public". Omit to keep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,12 +41,18 @@ pub struct SharingRequest {
     pub add_emails: Vec<String>,
     #[serde(default)]
     pub remove_emails: Vec<String>,
+    #[serde(default)]
+    pub add_pubkeys: Vec<String>,
+    #[serde(default)]
+    pub remove_pubkeys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharingResponse {
     pub visibility: String,
     pub shared_emails: Vec<String>,
+    #[serde(default)]
+    pub shared_pubkeys: Vec<String>,
     #[serde(default)]
     pub invited_emails: Vec<String>,
 }
@@ -63,6 +69,16 @@ pub struct SiteSummary {
     pub kind: String,
     pub active_version: Option<u32>,
     pub shared_emails: Vec<String>,
+    #[serde(default)]
+    pub shared_pubkeys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeViewerSessionRequest {
+    pub purpose: String,
+    pub return_to: String,
+    pub client: String,
+    pub nonce: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
