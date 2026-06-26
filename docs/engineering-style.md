@@ -63,6 +63,11 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   before relying on it. Each item needs an observed source, risk, first
   proof, and delete condition. A shortcut without a delete condition is not
   accepted debt; it is unfinished design.
+- Prefer hard cuts over compatibility shadow paths. Do not keep duplicate
+  old/new APIs, fallbacks, launch/test-only shims, or parallel implementations
+  merely to preserve pre-release tests or harnesses. Rewrite tests and callers
+  to the new shape unless the user explicitly asks for backwards compatibility
+  for real shipped users.
 
 ## Assert Boundary
 
