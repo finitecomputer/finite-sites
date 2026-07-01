@@ -77,6 +77,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         "allowed" => allowlist_list(&args[1..]),
         "pre-user-reset" => pre_user_reset(&args[1..]),
         "git-post-receive" => git_post_receive(),
+        "--version" | "-V" | "version" => version(&args[1..]),
         "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -99,6 +100,14 @@ fn usage() -> String {
      finitesitesd pre-user-reset --data DIR --confirm-wipe-product-data yes\n  \
      finitesitesd git-post-receive"
         .to_string()
+}
+
+fn version(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: finitesitesd --version".to_string());
+    }
+    println!("finitesitesd {}", env!("CARGO_PKG_VERSION"));
+    Ok(())
 }
 
 type ParsedFlags = (Vec<(String, String)>, Vec<String>);
@@ -440,6 +449,17 @@ fn reset_product_data(data_dir: &Path) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_probe_is_read_only() {
+        run(vec!["--version".to_string()]).unwrap();
+        run(vec!["-V".to_string()]).unwrap();
+        run(vec!["version".to_string()]).unwrap();
+        assert_eq!(
+            run(vec!["--version".to_string(), "extra".to_string()]).unwrap_err(),
+            "usage: finitesitesd --version"
+        );
+    }
 
     #[test]
     fn pre_user_reset_wipes_product_data_and_preserves_runtime_secret() {

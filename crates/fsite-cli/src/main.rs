@@ -71,6 +71,7 @@ fn run(args: &[String]) -> Result<(), CliError> {
         "project" => project_command(&args[1..]),
         "auth" => auth_command(&args[1..]),
         "view" => view(&args[1..]),
+        "--version" | "-V" | "version" => version(&args[1..]),
         "email-login" | "email-redeem" | "email-claim" | "status" | "list" | "share" | "claim"
         | "publish" | "publish-app" | "source" => Err(CliError::Usage(
             removed_site_first_command_help(command.as_str()),
@@ -96,6 +97,14 @@ fn help_requested(args: &[String]) -> bool {
 
 fn print_help(text: &str) -> Result<(), CliError> {
     println!("{text}");
+    Ok(())
+}
+
+fn version(args: &[String]) -> Result<(), CliError> {
+    if !args.is_empty() {
+        return Err(CliError::Usage("usage: fsite --version".to_string()));
+    }
+    println!("fsite {}", env!("CARGO_PKG_VERSION"));
     Ok(())
 }
 
@@ -1252,6 +1261,9 @@ mod tests {
     fn help_is_read_only_for_agent_probe_paths() {
         let commands = [
             &["--help"][..],
+            &["--version"][..],
+            &["-V"][..],
+            &["version"][..],
             &["whoami", "--help"][..],
             &["describe", "--help"],
             &["project", "--help"],
