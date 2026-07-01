@@ -21,7 +21,7 @@ local default.
 - **Risk**: API-plane brute force (NIP-98 makes this low-value) and
   origin-direct floods if Cloudflare is bypassed.
 - **Proof**: only `request_link` consults `login_limiter`.
-- **Delete condition**: per-IP budgets on the API plane (project applies and
+- **Delete condition**: per-IP budgets on the API plane (project init attempts and
   git deploys per pubkey per hour) before registration opens beyond the operator
   publish grant gate; Cloudflare rate-limiting rules on `/_finite/*` as
   belt-and-braces when the zone goes live.
@@ -68,7 +68,7 @@ local default.
 
 `https://api.finite.chat` is pinned end to end and the signed-call gate
 passed on 2026-06-09 and later updated to the Project Repository flow:
-project apply plus git push from a remote machine through Cloudflare
+project init plus git push from a remote machine through Cloudflare
 succeeded against finite-lat-2. The residual behavior (a
 misconfigured `--api-url` fails closed with "url mismatch") is documented
 in `docs/deploy-finite-lat-2.md` along with the on-box smoke procedure.

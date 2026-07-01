@@ -20,11 +20,13 @@ Core decisions:
 - Output routing names are namespaced by output kind and serving domain. A
   Site Name, Document Name, and PDF Name may use the same DNS label because
   they resolve under different wildcard domains.
-- Project Slug and Site Name are separate identifiers, even when simple flows
-  default them to the same string.
+- Project Slug and Site Name are separate identifiers. Simple projects may
+  choose the same string for both, but the Project Config must make that
+  choice explicit.
 - Project Config is a root `finite.toml` that describes Project Outputs.
-  Deploy Branch publishing requires this file. `fsite` may generate it for
-  happy paths, but the deploy system should not infer output paths.
+  Deploy Branch publishing requires this file. `fsite` documents the schema
+  and validates it through Project Init; the deploy system must not infer
+  output paths.
 - Document Outputs also require an explicit Project Config entry. Pushing a
   lone Markdown file never creates or exposes a document by inference; single
   file documents are supported by pointing an output path at that Markdown
@@ -74,8 +76,11 @@ Core decisions:
 - If an agent tries a removed site-first command such as `fsite publish`, the
   CLI should fail with guidance to the Project Repository workflow rather than
   a bare unknown-command error.
-- Agents may edit Project Config directly, but should prefer Agent-Safe
-  `fsite project apply --dry-run` workflows when creating or changing outputs.
+- Agents edit Project Config directly and validate it with
+  `fsite project init --config finite.toml --dry-run --output json` before
+  creating Project Repositories and Project Outputs. Existing output config
+  changes are intentionally not a Milestone 1 mutation; create a new
+  Project/Output until an explicit update path is designed.
 - Agents own build steps and commit Deploy Outputs. Finite Sites never becomes
   Vercel-style build infrastructure for this tier.
 - Pushing to a Deploy Branch auto-publishes committed output bytes as a new
@@ -119,7 +124,8 @@ Core decisions:
   sites, and versions. It keeps host/runtime configuration such as installed
   binaries, systemd units, Caddy/Cloudflare configuration, mail provider
   configuration, OS users, deployment scripts, and source checkouts.
-- `fsite` must become Agent-Safe: structured input/output, dry-run validation,
+- `fsite` must become Agent-Safe: `finite.toml` as the structured Project
+  Config input, structured JSON output, dry-run validation where applicable,
   deterministic errors, and machine-readable descriptions of commands and
   workflows.
 

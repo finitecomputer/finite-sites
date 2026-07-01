@@ -5,29 +5,27 @@
 //!
 //!   fsite whoami
 //!   fsite describe workflow publish-static-site --output json
-//!   fsite project apply --json project.json --dry-run --output json
+//!   fsite project init --config finite.toml --dry-run --output json
+//!   fsite project grant PROJECT --email EDITOR_EMAIL --send-invite --output json
 //!   fsite auth git PROJECT [--email EMAIL] [--store] [--output json]
-//!   fsite status NAME
-//!   fsite list
-//!   fsite share NAME [--shared|--private] [--public --yes-public]
-//!                    [--add-email E]... [--remove-email E]...
+//!   fsite project status PROJECT --output json
+//!   fsite project list --output json
+//!   fsite view URL_OR_NAME --output json
 //!
 //! Server address comes from FINITE_SITES_API (default https://api.finite.chat).
 
 mod api;
 mod keys;
 
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 use thiserror::Error;
 
 use finitesites_proto::dto::{
-    GitAuthRequest, GitAuthResponse, ProjectApplyRequest, ProjectCollaboratorRemoveRequest,
-    SharingRequest,
+    GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest,
 };
-use finitesites_proto::limits::MAX_EMAILS_PER_SHARING_REQUEST;
 use finitesites_proto::npub;
 use finitesites_proto::project_config::parse_project_config_toml;
 
@@ -69,15 +67,12 @@ fn run(args: &[String]) -> Result<(), CliError> {
     };
     match command.as_str() {
         "whoami" => no_args_or_help(&args[1..], "fsite whoami", whoami_help(), whoami),
-        "email-login" => email_login(&args[1..]),
-        "email-redeem" => email_redeem(&args[1..]),
         "describe" => describe(&args[1..]),
         "project" => project_command(&args[1..]),
         "auth" => auth_command(&args[1..]),
-        "status" => status(&args[1..]),
-        "list" => no_args_or_help(&args[1..], "fsite list", list_help(), list),
-        "share" => share(&args[1..]),
-        "claim" | "publish" | "publish-app" | "source" => Err(CliError::Usage(
+        "view" => view(&args[1..]),
+        "email-login" | "email-redeem" | "email-claim" | "status" | "list" | "share" | "claim"
+        | "publish" | "publish-app" | "source" => Err(CliError::Usage(
             removed_site_first_command_help(command.as_str()),
         )),
         "--help" | "help" => {
@@ -126,34 +121,35 @@ fn usage() -> String {
      cloneable by collaborators but not served as ordinary web assets.\n\n\
      Agent quick start for a static site:\n  \
      fsite describe workflow publish-static-site --output json\n  \
-     fsite project apply --json project.json --dry-run --output json\n  \
-     fsite project apply --json project.json --send-invite --output json\n  \
+     fsite project init --config finite.toml --dry-run --output json\n  \
+     fsite project init --config finite.toml --output json\n  \
      fsite auth git PROJECT --store --output json\n  \
      git clone https://git.finite.chat/PROJECT.git\n  \
      # commit finite.toml plus deploy bytes, then push the Deploy Branch\n\n\
-     Commands:\n  fsite whoami\n  fsite email-login EMAIL\n  \
-     fsite email-redeem EMAIL TOKEN\n  \
+     Commands:\n  fsite whoami\n  \
      fsite describe [workflow NAME] [--output json]\n  \
-     fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n  \
-     fsite project collaborator remove PROJECT --email EMAIL [--output json]\n  \
+     fsite project init --config finite.toml [--dry-run] [--output json]\n  \
+     fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  \
+     fsite project revoke PROJECT --email EMAIL [--output json]\n  \
+     fsite project status PROJECT [--output json]\n  \
+     fsite project list [--output json]\n  \
+     fsite auth login EMAIL\n  \
+     fsite auth redeem EMAIL TOKEN\n  \
      fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n  \
-     fsite status NAME\n  fsite list\n  fsite share NAME [--shared|--private] \
-     [--public --yes-public] [--send-invite] [--add-email EMAIL]... [--remove-email EMAIL]..."
+     fsite view URL_OR_NAME [--output json]"
         .to_string()
 }
 
 fn removed_site_first_command_help(command: &str) -> String {
     format!(
-        "`fsite {command}` is not part of the current Project Repository \
-         model. Finite Sites does not upload arbitrary local files directly; \
-         it publishes commits pushed to a Project Repository Deploy Branch.\n\n\
-         Use the agent workflow instead:\n  \
-         fsite describe workflow publish-static-site --output json\n  \
-         fsite project apply --json project.json --dry-run --output json\n  \
-         fsite project apply --json project.json --send-invite --output json\n  \
+        "`fsite {command}` is not part of the current Project Repository model.\n\n\
+         Use the explicit primitives instead:\n  \
+         fsite project init --config finite.toml --dry-run --output json\n  \
+         fsite project init --config finite.toml --output json\n  \
+         fsite project grant PROJECT --email EDITOR_EMAIL --send-invite --output json\n  \
          fsite auth git PROJECT --store --output json\n  \
          git clone https://git.finite.chat/PROJECT.git\n  \
-         # commit finite.toml plus the selected output path, then git push"
+         # edit, commit, and push the configured Deploy Branch"
     )
 }
 
@@ -161,52 +157,52 @@ fn whoami_help() -> &'static str {
     "usage: fsite whoami\n\nPrint the local User Key npub and key file path. Creates the identity if missing."
 }
 
-fn email_login_help() -> &'static str {
-    "usage: fsite email-login EMAIL\n\nRequest a one-time email verification token for an External Principal."
-}
-
-fn email_redeem_help() -> &'static str {
-    "usage: fsite email-redeem EMAIL TOKEN\n\nVerify this machine's Email Key for an External Principal."
-}
-
 fn describe_help() -> &'static str {
-    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: project-config, publish-static-site, edit-shared-project, grant-collaborator, remove-collaborator."
+    "usage: fsite describe [workflow NAME] [--output json]\n\nMachine-readable command and workflow discovery. Workflows: project-config, publish-static-site, edit-shared-project, grant-collaborator, revoke-collaborator."
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n  fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nCreate/update Project Repositories and manage Project Collaborators. For static sites, start with: fsite describe workflow publish-static-site --output json"
+    "usage:\n  fsite project init --config finite.toml [--dry-run] [--output json]\n  fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT --email EMAIL [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and declared outputs; git edits and publishes content; grant/revoke manage Project edit access."
 }
 
-fn project_apply_help() -> &'static str {
-    "usage: fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]\n\nReads Project apply JSON, validates it, optionally writes finite.toml, and creates/updates Project Outputs. This reserves the Project/Output and config; it does not deploy bytes. Commit finite.toml plus the configured output path to the Project Repository and push the Deploy Branch to publish a Version. Use --send-invite to email Project Collaborators with fsite/git instructions. Use --dry-run before mutating. Use --output json for agent workflows."
+fn project_init_help() -> &'static str {
+    "usage: fsite project init --config finite.toml [--dry-run] [--output json]\n\nInitialize one Project Repository from finite.toml. This reserves the Project Slug and declared Project Outputs; it does not deploy bytes. Retry is safe only with the same finite.toml. To publish, commit finite.toml plus the selected output path to the Project Repository and push the Deploy Branch."
 }
 
-fn project_collaborator_help() -> &'static str {
-    "usage: fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nRemove a Project Collaborator by External Principal email and revoke that Principal's active Git Credentials for this Project."
+fn project_grant_help() -> &'static str {
+    "usage: fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]\n\nGrant Project Repository edit access to an External Principal email. Use --send-invite to email agent-facing auth/git instructions."
 }
 
-fn project_collaborator_remove_help() -> &'static str {
-    "usage: fsite project collaborator remove PROJECT --email EMAIL [--output json]\n\nOwner-authenticated revocation. Safe to replay: removed=false means the collaborator was already inactive or unknown."
+fn project_revoke_help() -> &'static str {
+    "usage: fsite project revoke PROJECT --email EMAIL [--output json]\n\nRemove Project Repository edit access for an External Principal email and revoke active Git Credentials. Safe to replay: removed=false means the collaborator was already inactive or unknown."
+}
+
+fn project_status_help() -> &'static str {
+    "usage: fsite project status PROJECT [--output json]\n\nShow Project Repository control-plane state: git remote, actor role, declared outputs, output URLs, branch/path, visibility, and active version."
+}
+
+fn project_list_help() -> &'static str {
+    "usage: fsite project list [--output json]\n\nList Project Repositories this actor owns or may edit."
 }
 
 fn auth_help() -> &'static str {
-    "usage: fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n\nMint scoped HTTPS Git Credentials. Omit --email when the local User Key is already a native Project Collaborator. Use --store to save the credential for standard git without printing the password."
+    "usage:\n  fsite auth login EMAIL\n  fsite auth redeem EMAIL TOKEN\n  fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n\nAuthenticate this machine for Finite Sites. Email auth proves an External Principal; git auth mints a scoped HTTPS Git Credential for one Project Repository."
 }
 
 fn auth_git_help() -> &'static str {
     "usage: fsite auth git PROJECT [--email EMAIL] [--store] [--output json]\n\nReturns git_remote_url, username, and password for standard git clone/push against one Project Repository. With --store, configures a path-aware Git credential helper for the Finite Git host, stores the scoped credential, and omits the password from output."
 }
 
-fn status_help() -> &'static str {
-    "usage: fsite status NAME\n\nPrint registry status for one Finite Site."
+fn auth_login_help() -> &'static str {
+    "usage: fsite auth login EMAIL\n\nRequest a one-time email verification token for an External Principal."
 }
 
-fn list_help() -> &'static str {
-    "usage: fsite list\n\nList Finite Sites owned by the local User Key."
+fn auth_redeem_help() -> &'static str {
+    "usage: fsite auth redeem EMAIL TOKEN\n\nVerify this machine's Email Key for an External Principal."
 }
 
-fn share_help() -> &'static str {
-    "usage: fsite share NAME [--shared|--private] [--public --yes-public] [--send-invite] [--add-email EMAIL]... [--remove-email EMAIL]...\n\nChange output Visibility or email Share rows. Use --send-invite with --add-email to email one-time viewer links. Public sharing requires explicit human confirmation and --yes-public."
+fn view_help() -> &'static str {
+    "usage: fsite view URL_OR_NAME [--output json]\n\nInspect a served Project Output URL or routing name. This is read-only; project editing happens through git after fsite auth git."
 }
 
 fn describe(args: &[String]) -> Result<(), CliError> {
@@ -269,24 +265,49 @@ fn describe_commands() -> serde_json::Value {
     serde_json::json!({
         "commands": [
             {
-                "name": "project apply",
-                "summary": "Create or update a Project Repository and finite.toml-described outputs.",
-                "usage": "fsite project apply --json FILE|- [--dry-run] [--send-invite] [--output json] [--config finite.toml]"
+                "name": "project init",
+                "summary": "Initialize a Project Repository and finite.toml-described outputs.",
+                "usage": "fsite project init --config finite.toml [--dry-run] [--output json]"
             },
             {
-                "name": "share",
-                "summary": "Change Project Output visibility and email view shares.",
-                "usage": "fsite share NAME [--shared|--private] [--public --yes-public] [--send-invite] [--add-email EMAIL]... [--remove-email EMAIL]..."
+                "name": "project grant",
+                "summary": "Grant Project Repository edit access to an External Principal email.",
+                "usage": "fsite project grant PROJECT --email EMAIL [--role editor] [--send-invite] [--output json]"
             },
             {
-                "name": "project collaborator remove",
-                "summary": "Remove a Project Collaborator and revoke active Git Credentials for that Principal.",
-                "usage": "fsite project collaborator remove PROJECT --email EMAIL [--output json]"
+                "name": "project revoke",
+                "summary": "Remove Project Repository edit access and revoke active Git Credentials for that Principal.",
+                "usage": "fsite project revoke PROJECT --email EMAIL [--output json]"
+            },
+            {
+                "name": "project status",
+                "summary": "Show Project Repository, output, and deploy state.",
+                "usage": "fsite project status PROJECT [--output json]"
+            },
+            {
+                "name": "project list",
+                "summary": "List Project Repositories this actor owns or may edit.",
+                "usage": "fsite project list [--output json]"
+            },
+            {
+                "name": "auth login",
+                "summary": "Request an email verification token for an External Principal.",
+                "usage": "fsite auth login EMAIL"
+            },
+            {
+                "name": "auth redeem",
+                "summary": "Verify this machine's Email Key for an External Principal.",
+                "usage": "fsite auth redeem EMAIL TOKEN"
             },
             {
                 "name": "auth git",
                 "summary": "Mint a scoped HTTPS Git Credential for a native Project Collaborator or verified External Principal.",
                 "usage": "fsite auth git PROJECT [--email EMAIL] [--store] [--output json]"
+            },
+            {
+                "name": "view",
+                "summary": "Inspect a served Project Output URL or routing name without mutating state.",
+                "usage": "fsite view URL_OR_NAME [--output json]"
             },
             {
                 "name": "describe workflow",
@@ -299,7 +320,7 @@ fn describe_commands() -> serde_json::Value {
             "publish-static-site",
             "edit-shared-project",
             "grant-collaborator",
-            "remove-collaborator"
+            "revoke-collaborator"
         ],
         "start_here": {
             "static_site": "fsite describe workflow publish-static-site --output json",
@@ -322,9 +343,9 @@ fn publish_static_site_workflow() -> serde_json::Value {
         "steps": [
             "Keep the whole project source tree in the Project Repository.",
             "Put generated static website files in a dedicated output directory such as site/ unless the repository is deploy-only.",
-            "Create project apply JSON with project.slug, one output with kind=site, site_name, branch=main, path=site, and spa=false unless the app needs SPA fallback.",
-            "Run fsite project apply --json project.json --dry-run --output json and read any validation error.",
-            "After human confirmation, run fsite project apply --json project.json --send-invite --output json.",
+            "Create finite.toml with project.slug, one output with kind=site, site_name, branch=main, path=site, and spa=false unless the app needs SPA fallback.",
+            "Run fsite project init --config finite.toml --dry-run --output json and read any validation error.",
+            "After human confirmation, run fsite project init --config finite.toml --output json.",
             "Run fsite auth git PROJECT --store --output json using the local native User Key, or add --email EDITOR_EMAIL only when using an External Principal.",
             "Clone the returned git_remote_url.",
             "Keep finite.toml, the selected output path, and any source/data/build files collaborators need in the Project Repository. Only the output path is served as the website.",
@@ -338,22 +359,6 @@ fn publish_static_site_workflow() -> serde_json::Value {
             "Do not set path='.' unless the whole repository is intended to be served.",
             "Do not print Git Credential passwords; prefer --store."
         ],
-        "project_apply_json_example": {
-            "config": {
-                "project": { "slug": "my-project" },
-                "outputs": {
-                    "site": {
-                        "kind": "site",
-                        "site_name": "my-project",
-                        "branch": "main",
-                        "path": "site",
-                        "spa": false
-                    }
-                }
-            },
-            "dry_run": false,
-            "collaborators": []
-        },
         "finite_toml_example": "[project]\nslug = \"my-project\"\n\n[outputs.site]\nkind = \"site\"\nsite_name = \"my-project\"\nbranch = \"main\"\npath = \"site\"\nspa = false\n"
     })
 }
@@ -378,8 +383,8 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
             "name": "edit-shared-project",
             "steps": [
                 "If you are a native Project Collaborator, run fsite auth git PROJECT --store --output json.",
-                "If you are using an External Principal email, run fsite email-login EDITOR_EMAIL if this machine is not verified.",
-                "For email auth, run fsite email-redeem EDITOR_EMAIL TOKEN_FROM_EMAIL.",
+                "If you are using an External Principal email, run fsite auth login EDITOR_EMAIL if this machine is not verified.",
+                "For email auth, run fsite auth redeem EDITOR_EMAIL TOKEN_FROM_EMAIL.",
                 "For email auth, run fsite auth git PROJECT --email EDITOR_EMAIL --store --output json.",
                 "Clone using the returned git_remote_url; the password is stored in Git's credential helper and is not printed.",
                 "Clone, edit source, run the project's tests/build, commit deploy bytes, and push the Deploy Branch."
@@ -388,24 +393,22 @@ fn describe_workflow(name: &str) -> Result<serde_json::Value, CliError> {
         "grant-collaborator" => serde_json::json!({
             "name": "grant-collaborator",
             "steps": [
-                "Add the collaborator email to the collaborators array in the project apply JSON.",
-                "Use role editor for agents that may push deploy bytes.",
-                "Run fsite project apply --json project.json --dry-run --output json.",
-                "Run fsite project apply --json project.json --send-invite --output json after confirming the plan."
+                "Use the Project owner identity, not the collaborator email key.",
+                "Run fsite project grant PROJECT --email COLLABORATOR_EMAIL --role editor --send-invite --output json.",
+                "The collaborator should run fsite auth redeem from the email, then fsite auth git PROJECT --email COLLABORATOR_EMAIL --store --output json."
             ]
         }),
-        "remove-collaborator" => serde_json::json!({
-            "name": "remove-collaborator",
+        "revoke-collaborator" => serde_json::json!({
+            "name": "revoke-collaborator",
             "steps": [
                 "Use the Project owner identity, not the collaborator email key.",
-                "Run fsite project collaborator remove PROJECT --email COLLABORATOR_EMAIL --output json.",
-                "Check removed and revoked_git_credentials in the JSON response.",
-                "If the Project Output should no longer be viewable by that email, also run fsite share SITE_NAME --remove-email COLLABORATOR_EMAIL."
+                "Run fsite project revoke PROJECT --email COLLABORATOR_EMAIL --output json.",
+                "Check removed and revoked_git_credentials in the JSON response."
             ]
         }),
         other => {
             return Err(CliError::Usage(format!(
-                "unknown workflow `{other}` (project-config|publish-static-site|edit-shared-project|grant-collaborator|remove-collaborator)"
+                "unknown workflow `{other}` (project-config|publish-static-site|edit-shared-project|grant-collaborator|revoke-collaborator)"
             )));
         }
     };
@@ -418,30 +421,194 @@ fn project_command(args: &[String]) -> Result<(), CliError> {
     };
     match subcommand.as_str() {
         value if is_help_arg(value) => print_help(project_help()),
-        "apply" => project_apply(rest),
-        "collaborator" => project_collaborator_command(rest),
+        "init" => project_init(rest),
+        "grant" => project_grant(rest),
+        "revoke" => project_revoke(rest),
+        "status" => project_status(rest),
+        "list" => project_list(rest),
+        "apply" | "collaborator" => Err(CliError::Usage(removed_site_first_command_help(
+            &format!("project {subcommand}"),
+        ))),
         other => Err(CliError::Usage(format!(
             "unknown project command `{other}`"
         ))),
     }
 }
 
-fn project_collaborator_command(args: &[String]) -> Result<(), CliError> {
-    let Some((subcommand, rest)) = args.split_first() else {
-        return Err(CliError::Usage(project_collaborator_help().to_string()));
-    };
-    match subcommand.as_str() {
-        value if is_help_arg(value) => print_help(project_collaborator_help()),
-        "remove" => project_collaborator_remove(rest),
-        other => Err(CliError::Usage(format!(
-            "unknown project collaborator command `{other}`"
-        ))),
+fn project_init(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(project_init_help());
     }
+    let mut config_path: Option<PathBuf> = None;
+    let mut dry_run = false;
+    let mut output_json = false;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--config needs a path".to_string()))?;
+                config_path = Some(PathBuf::from(value));
+                index += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                index += 1;
+            }
+            "--output" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
+                }
+                output_json = true;
+                index += 2;
+            }
+            other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
+        }
+    }
+
+    let config_path =
+        config_path.ok_or_else(|| CliError::Usage(project_init_help().to_string()))?;
+    let config = read_project_config_file(&config_path)?;
+    let request = ProjectInitRequest { config, dry_run };
+    request
+        .config
+        .validate()
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+
+    let identity = keys::load_or_create_identity()?;
+    let client = api::Client::from_env();
+    let response = client.init_project(&identity, &request)?;
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("response serializes")
+        );
+    } else {
+        println!("project: {}", response.slug);
+        println!("git:     {}", response.git_remote_url);
+        for output in &response.outputs {
+            println!(
+                "output:  {} {} -> {} ({}:{})",
+                output.output_id, output.kind, output.site_url, output.branch, output.path
+            );
+        }
+        if response.dry_run {
+            println!("dry-run: no server state changed");
+        } else {
+            println!(
+                "next:    fsite auth git {} --store --output json",
+                response.slug
+            );
+            println!(
+                "publish: commit {} and push the Deploy Branch",
+                config_path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
-fn project_collaborator_remove(args: &[String]) -> Result<(), CliError> {
+fn read_project_config_file(
+    path: &Path,
+) -> Result<finitesites_proto::project_config::ProjectConfig, CliError> {
+    let existing = std::fs::read_to_string(path)
+        .map_err(|error| CliError::Io(format!("cannot read {}: {error}", path.display())))?;
+    parse_project_config_toml(&existing)
+        .map_err(|error| CliError::Usage(format!("{} is invalid: {error}", path.display())))
+}
+
+fn project_grant(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
-        return print_help(project_collaborator_remove_help());
+        return print_help(project_grant_help());
+    }
+    let mut project: Option<String> = None;
+    let mut email: Option<String> = None;
+    let mut role = "editor".to_string();
+    let mut send_invite = false;
+    let mut output_json = false;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--email" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--email needs a value".to_string()))?;
+                email = Some(value.clone());
+                index += 2;
+            }
+            "--role" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--role needs a value".to_string()))?;
+                role = value.clone();
+                index += 2;
+            }
+            "--send-invite" => {
+                send_invite = true;
+                index += 1;
+            }
+            "--output" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
+                }
+                output_json = true;
+                index += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            value => {
+                if project.is_some() {
+                    return Err(CliError::Usage(project_grant_help().to_string()));
+                }
+                project = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    let project = project.ok_or_else(|| CliError::Usage(project_grant_help().to_string()))?;
+    let email = email.ok_or_else(|| CliError::Usage(project_grant_help().to_string()))?;
+    let identity = keys::load_or_create_identity()?;
+    let client = api::Client::from_env();
+    let response = client.grant_project(
+        &identity,
+        &project,
+        &ProjectGrantRequest { email, role },
+        send_invite,
+    )?;
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("response serializes")
+        );
+    } else {
+        println!("project: {}", response.project_slug);
+        println!("email:   {}", response.collaborator.email);
+        println!("role:    {}", response.collaborator.role);
+        println!("created: {}", response.collaborator.created);
+        if !response.invited_emails.is_empty() {
+            println!("invited: {}", response.invited_emails.join(", "));
+        }
+    }
+    Ok(())
+}
+
+fn project_revoke(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(project_revoke_help());
     }
     let mut project: Option<String> = None;
     let mut email: Option<String> = None;
@@ -474,9 +641,7 @@ fn project_collaborator_remove(args: &[String]) -> Result<(), CliError> {
             }
             value => {
                 if project.is_some() {
-                    return Err(CliError::Usage(
-                        project_collaborator_remove_help().to_string(),
-                    ));
+                    return Err(CliError::Usage(project_revoke_help().to_string()));
                 }
                 project = Some(value.to_string());
                 index += 1;
@@ -484,17 +649,11 @@ fn project_collaborator_remove(args: &[String]) -> Result<(), CliError> {
         }
     }
 
-    let project =
-        project.ok_or_else(|| CliError::Usage(project_collaborator_remove_help().to_string()))?;
-    let email =
-        email.ok_or_else(|| CliError::Usage(project_collaborator_remove_help().to_string()))?;
+    let project = project.ok_or_else(|| CliError::Usage(project_revoke_help().to_string()))?;
+    let email = email.ok_or_else(|| CliError::Usage(project_revoke_help().to_string()))?;
     let identity = keys::load_or_create_identity()?;
     let client = api::Client::from_env();
-    let response = client.remove_project_collaborator(
-        &identity,
-        &project,
-        &ProjectCollaboratorRemoveRequest { email },
-    )?;
+    let response = client.revoke_project(&identity, &project, &ProjectRevokeRequest { email })?;
     if output_json {
         println!(
             "{}",
@@ -512,34 +671,69 @@ fn project_collaborator_remove(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn project_apply(args: &[String]) -> Result<(), CliError> {
+fn project_status(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
-        return print_help(project_apply_help());
+        return print_help(project_status_help());
     }
-    let mut json_path: Option<String> = None;
-    let mut dry_run = false;
-    let mut send_invites = false;
+    let (project, output_json) = parse_project_read_args(args, project_status_help())?;
+    let identity = keys::load_or_create_identity()?;
+    let client = api::Client::from_env();
+    let response = client.project_status(&identity, &project)?;
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("response serializes")
+        );
+    } else {
+        println!("project: {}", response.slug);
+        println!("role:    {}", response.role);
+        println!("git:     {}", response.git_remote_url);
+        print_project_outputs(&response.outputs);
+        if !response.collaborators.is_empty() {
+            println!("collaborators:");
+            for collaborator in &response.collaborators {
+                println!("  {} {}", collaborator.role, collaborator.email);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn project_list(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(project_list_help());
+    }
+    let output_json = parse_output_json_only(args, project_list_help())?;
+    let identity = keys::load_or_create_identity()?;
+    let client = api::Client::from_env();
+    let response = client.project_list(&identity)?;
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("response serializes")
+        );
+    } else if response.projects.is_empty() {
+        println!(
+            "no projects yet; initialize one with `fsite project init --config finite.toml --dry-run --output json`"
+        );
+    } else {
+        for project in &response.projects {
+            println!(
+                "{:<24} {:<8} {}",
+                project.slug, project.role, project.git_remote_url
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_project_read_args(args: &[String], help: &str) -> Result<(String, bool), CliError> {
+    let mut project: Option<String> = None;
     let mut output_json = false;
-    let mut config_path = PathBuf::from("finite.toml");
     let mut index: usize = 0;
     // Bounded by argv length.
     while index < args.len() {
         match args[index].as_str() {
-            "--json" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| CliError::Usage("--json needs FILE or -".to_string()))?;
-                json_path = Some(value.clone());
-                index += 2;
-            }
-            "--dry-run" => {
-                dry_run = true;
-                index += 1;
-            }
-            "--send-invite" => {
-                send_invites = true;
-                index += 1;
-            }
             "--output" => {
                 let value = args
                     .get(index + 1)
@@ -552,106 +746,58 @@ fn project_apply(args: &[String]) -> Result<(), CliError> {
                 output_json = true;
                 index += 2;
             }
-            "--config" => {
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            value => {
+                if project.is_some() {
+                    return Err(CliError::Usage(help.to_string()));
+                }
+                project = Some(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    let project = project.ok_or_else(|| CliError::Usage(help.to_string()))?;
+    Ok((project, output_json))
+}
+
+fn parse_output_json_only(args: &[String], help: &str) -> Result<bool, CliError> {
+    let mut output_json = false;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--output" => {
                 let value = args
                     .get(index + 1)
-                    .ok_or_else(|| CliError::Usage("--config needs a path".to_string()))?;
-                config_path = PathBuf::from(value);
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
+                }
+                output_json = true;
                 index += 2;
             }
-            other => return Err(CliError::Usage(format!("unknown flag `{other}`"))),
+            other => return Err(CliError::Usage(format!("{help}\nunknown flag `{other}`"))),
         }
     }
-    let json_path = json_path.ok_or_else(|| CliError::Usage(project_apply_help().to_string()))?;
-    let mut request: ProjectApplyRequest = serde_json::from_slice(&read_json_input(&json_path)?)
-        .map_err(|error| CliError::Usage(format!("invalid project apply json: {error}")))?;
-    if dry_run {
-        request.dry_run = true;
-    }
-    request
-        .config
-        .validate()
-        .map_err(|error| CliError::Usage(error.to_string()))?;
-    validate_project_config_file(&config_path, &request)?;
+    Ok(output_json)
+}
 
-    let identity = keys::load_or_create_identity()?;
-    let client = api::Client::from_env();
-    let response = client.apply_project(&identity, &request, send_invites)?;
-    if !response.dry_run {
-        write_project_config_file_if_missing(&config_path, &request)?;
-    }
-    if output_json {
+fn print_project_outputs(outputs: &[finitesites_proto::dto::ProjectOutputSummary]) {
+    for output in outputs {
+        let version = output
+            .active_version
+            .map(|value| format!("v{value}"))
+            .unwrap_or_else(|| "unpublished".to_string());
         println!(
-            "{}",
-            serde_json::to_string_pretty(&response).expect("response serializes")
+            "output:  {} {} {} {} {}:{}",
+            output.output_id, output.kind, output.visibility, version, output.branch, output.path
         );
-    } else {
-        println!("project: {}", response.slug);
-        println!("git:     {}", response.git_remote_url);
-        for output in &response.outputs {
-            println!(
-                "output:  {} {} -> {} ({})",
-                output.output_id, output.kind, output.site_url, output.path
-            );
-        }
-        if !response.invited_emails.is_empty() {
-            println!("invited: {}", response.invited_emails.join(", "));
-        }
-        if response.dry_run {
-            println!("dry-run: no server state changed and finite.toml was not written");
-            if send_invites {
-                println!("dry-run: no invite email was sent");
-            }
-        }
+        println!("url:     {}", output.site_url);
     }
-    Ok(())
-}
-
-fn read_json_input(path: &str) -> Result<Vec<u8>, CliError> {
-    if path == "-" {
-        let mut bytes = Vec::new();
-        std::io::stdin()
-            .read_to_end(&mut bytes)
-            .map_err(|error| CliError::Io(format!("cannot read stdin: {error}")))?;
-        return Ok(bytes);
-    }
-    std::fs::read(path).map_err(|error| CliError::Io(format!("cannot read {path}: {error}")))
-}
-
-fn validate_project_config_file(
-    path: &Path,
-    request: &ProjectApplyRequest,
-) -> Result<(), CliError> {
-    if path.exists() {
-        let existing = std::fs::read_to_string(path)
-            .map_err(|error| CliError::Io(format!("cannot read {}: {error}", path.display())))?;
-        let parsed = parse_project_config_toml(&existing)
-            .map_err(|error| CliError::Usage(format!("{} is invalid: {error}", path.display())))?;
-        if parsed != request.config {
-            return Err(CliError::Usage(format!(
-                "{} already exists and does not match --json config",
-                path.display()
-            )));
-        }
-        return Ok(());
-    }
-    Ok(())
-}
-
-fn write_project_config_file_if_missing(
-    path: &Path,
-    request: &ProjectApplyRequest,
-) -> Result<(), CliError> {
-    if path.exists() {
-        return Ok(());
-    }
-    let expected = request
-        .config
-        .to_toml_string()
-        .map_err(|error| CliError::Usage(error.to_string()))?;
-    std::fs::write(path, expected)
-        .map_err(|error| CliError::Io(format!("cannot write {}: {error}", path.display())))?;
-    Ok(())
 }
 
 fn auth_command(args: &[String]) -> Result<(), CliError> {
@@ -660,6 +806,8 @@ fn auth_command(args: &[String]) -> Result<(), CliError> {
     };
     match subcommand.as_str() {
         value if is_help_arg(value) => print_help(auth_help()),
+        "login" => auth_login(rest),
+        "redeem" => auth_redeem(rest),
         "git" => auth_git(rest),
         other => Err(CliError::Usage(format!("unknown auth command `{other}`"))),
     }
@@ -989,30 +1137,30 @@ fn whoami() -> Result<(), CliError> {
     println!("pubkey: {}", identity.pubkey);
     println!("file:   {}", keys::identity_path()?.display());
     println!();
-    println!("server grants are checked by project apply and auth git, not by whoami");
+    println!("server grants are checked by project init and auth git, not by whoami");
     Ok(())
 }
 
-fn email_login(args: &[String]) -> Result<(), CliError> {
+fn auth_login(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
-        return print_help(email_login_help());
+        return print_help(auth_login_help());
     }
     let [email] = args else {
-        return Err(CliError::Usage(email_login_help().to_string()));
+        return Err(CliError::Usage(auth_login_help().to_string()));
     };
     let client = api::Client::from_env();
     let response = client.request_email_login(email)?;
     println!("sent email login for {}", response.email);
-    println!("run the fsite email-redeem command from the email to verify this machine");
+    println!("run the fsite auth redeem command from the email to verify this machine");
     Ok(())
 }
 
-fn email_redeem(args: &[String]) -> Result<(), CliError> {
+fn auth_redeem(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
-        return print_help(email_redeem_help());
+        return print_help(auth_redeem_help());
     }
     let [email, token] = args else {
-        return Err(CliError::Usage(email_redeem_help().to_string()));
+        return Err(CliError::Usage(auth_redeem_help().to_string()));
     };
     let key = keys::load_or_create_email_key(email)?;
     let client = api::Client::from_env();
@@ -1021,164 +1169,75 @@ fn email_redeem(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-fn status(args: &[String]) -> Result<(), CliError> {
+fn view(args: &[String]) -> Result<(), CliError> {
     if help_requested(args) {
-        return print_help(status_help());
+        return print_help(view_help());
     }
-    let [name] = args else {
-        return Err(CliError::Usage(status_help().to_string()));
-    };
-    let identity = keys::load_or_create_identity()?;
-    let client = api::Client::from_env();
-    let summary = client.site_status(&identity, name)?;
-    print_summary(&summary);
-    Ok(())
-}
-
-fn list() -> Result<(), CliError> {
-    let identity = keys::load_or_create_identity()?;
-    let client = api::Client::from_env();
-    let response = client.list_sites(&identity)?;
-    if response.sites.is_empty() {
-        println!(
-            "no sites yet; create a Project Output with `fsite project apply --json project.json --dry-run --output json`"
-        );
-        return Ok(());
-    }
-    // Bounded by MAX_SITES_PER_OWNER.
-    for site in &response.sites {
-        let version = site
-            .active_version
-            .map(|v| format!("v{v}"))
-            .unwrap_or_else(|| "unpublished".to_string());
-        println!(
-            "{:<24} {:<8} {:<12} {:<8} {}",
-            site.name, site.kind, site.visibility, version, site.url
-        );
-    }
-    Ok(())
-}
-
-fn share(args: &[String]) -> Result<(), CliError> {
-    if help_requested(args) {
-        return print_help(share_help());
-    }
-    let Some((name, flags)) = args.split_first() else {
-        return Err(CliError::Usage(share_help().to_string()));
-    };
-
-    let mut visibility: Option<String> = None;
-    let mut confirm_public = false;
-    let mut send_invites = false;
-    let mut add_emails: Vec<String> = Vec::new();
-    let mut remove_emails: Vec<String> = Vec::new();
+    let mut target: Option<String> = None;
+    let mut output_json = false;
     let mut index: usize = 0;
     // Bounded by argv length.
-    while index < flags.len() {
-        match flags[index].as_str() {
-            "--public" => {
-                visibility = Some("public".to_string());
-                index += 1;
-            }
-            "--shared" => {
-                visibility = Some("shared".to_string());
-                index += 1;
-            }
-            "--private" => {
-                visibility = Some("private".to_string());
-                index += 1;
-            }
-            "--yes-public" => {
-                confirm_public = true;
-                index += 1;
-            }
-            "--send-invite" => {
-                send_invites = true;
-                index += 1;
-            }
-            "--add-email" | "--remove-email" => {
-                let value = flags
+    while index < args.len() {
+        match args[index].as_str() {
+            "--output" => {
+                let value = args
                     .get(index + 1)
-                    .ok_or_else(|| CliError::Usage(format!("{} needs a value", flags[index])))?;
-                if flags[index] == "--add-email" {
-                    add_emails.push(value.clone());
-                } else {
-                    remove_emails.push(value.clone());
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
                 }
+                output_json = true;
                 index += 2;
             }
-            other => {
+            other if other.starts_with("--") => {
                 return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            value => {
+                if target.is_some() {
+                    return Err(CliError::Usage(view_help().to_string()));
+                }
+                target = Some(value.to_string());
+                index += 1;
             }
         }
     }
-
-    if visibility.as_deref() == Some("public") && !confirm_public {
-        return Err(CliError::Usage(
-            "making a site public exposes it to the whole internet. \
-             Confirm with the user first, then re-run with --yes-public"
-                .to_string(),
-        ));
-    }
-    if add_emails.len() + remove_emails.len() > MAX_EMAILS_PER_SHARING_REQUEST as usize {
-        return Err(CliError::Usage(format!(
-            "at most {MAX_EMAILS_PER_SHARING_REQUEST} email changes per command"
-        )));
-    }
-    if send_invites && add_emails.is_empty() {
-        return Err(CliError::Usage(
-            "--send-invite requires at least one --add-email".to_string(),
-        ));
-    }
-    if visibility.is_none() && add_emails.is_empty() && remove_emails.is_empty() {
-        return Err(CliError::Usage(
-            "nothing to change; pass --shared/--private/--public and/or email flags".to_string(),
-        ));
-    }
-    // Adding emails to a site implies shared visibility unless stated.
-    if visibility.is_none() && !add_emails.is_empty() {
-        visibility = Some("shared".to_string());
-    }
-    if send_invites && visibility.as_deref() != Some("shared") {
-        return Err(CliError::Usage(
-            "--send-invite requires shared visibility".to_string(),
-        ));
-    }
-
-    let client = api::Client::from_env();
-    let request = SharingRequest {
-        visibility,
-        confirm_public,
-        add_emails,
-        remove_emails,
-    };
-    let identity = keys::load_or_create_identity()?;
-    let response = client.set_sharing(&identity, name, &request, send_invites)?;
-    println!("visibility: {}", response.visibility);
-    if response.shared_emails.is_empty() {
-        println!("shared with: nobody");
+    let target = target.ok_or_else(|| CliError::Usage(view_help().to_string()))?;
+    let url = view_target_url(&target);
+    let llms_url = append_url_path(&url, "llms.txt");
+    if output_json {
+        let value = serde_json::json!({
+            "url": url,
+            "llms_txt": llms_url,
+            "read_only": true,
+            "edit_hint": "Use fsite project status/list plus fsite auth git if you have Project Repository edit access."
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).expect("view json serializes")
+        );
     } else {
-        println!("shared with: {}", response.shared_emails.join(", "));
-    }
-    if !response.invited_emails.is_empty() {
-        println!("invited: {}", response.invited_emails.join(", "));
+        println!("url:      {url}");
+        println!("llms.txt: {llms_url}");
+        println!("note:     view is read-only; edit through the Project Repository with git");
     }
     Ok(())
 }
 
-fn print_summary(summary: &finitesites_proto::dto::SiteSummary) {
-    println!("name:       {}", summary.name);
-    println!("url:        {}", summary.url);
-    println!("status:     {}", summary.status);
-    println!("kind:       {}", summary.kind);
-    println!("visibility: {}", summary.visibility);
-    match summary.active_version {
-        Some(version) => println!("version:    v{version}"),
-        None => println!("version:    unpublished"),
+fn view_target_url(target: &str) -> String {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        if target.ends_with('/') {
+            return target.to_string();
+        }
+        return format!("{target}/");
     }
-    if !summary.shared_emails.is_empty() {
-        println!("shared:     {}", summary.shared_emails.join(", "));
-    }
+    format!("https://{target}.finite.chat/")
+}
+
+fn append_url_path(base: &str, path: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    format!("{trimmed}/{path}")
 }
 
 #[cfg(test)]
@@ -1194,18 +1253,18 @@ mod tests {
         let commands = [
             &["--help"][..],
             &["whoami", "--help"][..],
-            &["email-login", "--help"],
-            &["email-redeem", "--help"],
             &["describe", "--help"],
             &["project", "--help"],
-            &["project", "apply", "--help"],
-            &["project", "collaborator", "--help"],
-            &["project", "collaborator", "remove", "--help"],
+            &["project", "init", "--help"],
+            &["project", "grant", "--help"],
+            &["project", "revoke", "--help"],
+            &["project", "status", "--help"],
+            &["project", "list", "--help"],
             &["auth", "--help"],
+            &["auth", "login", "--help"],
+            &["auth", "redeem", "--help"],
             &["auth", "git", "--help"],
-            &["status", "--help"],
-            &["list", "--help"],
-            &["share", "--help"],
+            &["view", "--help"],
         ];
         // Bounded by the explicit command table above.
         for command in commands {
@@ -1219,9 +1278,14 @@ mod tests {
         assert!(text.contains("shares the whole source tree through a Project Repository"));
         assert!(text.contains("cloneable by collaborators but not served as ordinary web assets"));
         assert!(text.contains("fsite describe workflow publish-static-site --output json"));
-        assert!(text.contains("fsite project apply"));
+        assert!(text.contains("fsite project init --config finite.toml"));
+        assert!(text.contains("fsite project grant"));
+        assert!(text.contains("fsite project status"));
         assert!(text.contains("fsite auth git"));
-        assert!(text.contains("fsite share"));
+        assert!(text.contains("fsite view"));
+        assert!(!text.contains("fsite email-login"));
+        assert!(!text.contains("fsite project apply"));
+        assert!(!text.contains("fsite share"));
         assert!(!text.contains("fsite claim"));
         assert!(!text.contains("fsite publish "));
         assert!(!text.contains("fsite publish-app"));
@@ -1234,10 +1298,10 @@ mod tests {
         let value = describe_workflow("publish-static-site").unwrap();
         let text = serde_json::to_string(&value).unwrap();
         assert!(text.contains("authorized collaborators clone the whole source tree"));
+        assert!(text.contains("fsite project init --config finite.toml --dry-run --output json"));
         assert!(text.contains("For static sites, Finite serves only committed bytes"));
         assert!(text.contains("Source, data, docs, and build logic can live outside"));
         assert!(text.contains("Do not look for a direct publish/upload command"));
-        assert!(text.contains("\"path\":\"site\""));
         assert!(text.contains("fsite auth git PROJECT --store --output json"));
     }
 
@@ -1247,14 +1311,14 @@ mod tests {
             run(&args(&["publish"])),
             Err(CliError::Usage(message))
                 if message.contains("not part of the current Project Repository model")
-                    && message.contains("fsite describe workflow publish-static-site --output json")
+                    && message.contains("fsite project init --config finite.toml")
                     && message.contains("Deploy Branch")
         ));
         assert!(matches!(
             run(&args(&["publish-app"])),
             Err(CliError::Usage(message))
                 if message.contains("not part of the current Project Repository model")
-                    && message.contains("does not upload arbitrary local files directly")
+                    && message.contains("fsite auth git PROJECT --store --output json")
         ));
     }
 
@@ -1265,7 +1329,7 @@ mod tests {
             Err(CliError::Usage(_))
         ));
         assert!(matches!(
-            run(&args(&["list", "extra"])),
+            run(&args(&["project", "list", "extra"])),
             Err(CliError::Usage(_))
         ));
     }
@@ -1323,39 +1387,37 @@ mod tests {
     }
 
     #[test]
-    fn share_invite_requires_added_email_and_shared_visibility() {
+    fn removed_commands_point_to_current_primitives() {
         assert!(matches!(
             run(&args(&["share", "demo", "--send-invite"])),
-            Err(CliError::Usage(message)) if message.contains("--send-invite requires at least one --add-email")
+            Err(CliError::Usage(message)) if message.contains("not part of the current Project Repository model")
         ));
         assert!(matches!(
-            run(&args(&[
-                "share",
-                "demo",
-                "--private",
-                "--send-invite",
-                "--add-email",
-                "friend@example.com"
-            ])),
-            Err(CliError::Usage(message)) if message.contains("--send-invite requires shared visibility")
+            run(&args(&["project", "apply", "--help"])),
+            Err(CliError::Usage(message)) if message.contains("fsite project init --config finite.toml")
         ));
     }
 
     #[test]
     fn project_example_fixture_matches_committed_config() {
-        let request: ProjectApplyRequest = serde_json::from_str(include_str!(
-            "../../../examples/project-applies/finitechat-native-mockup.json"
-        ))
-        .unwrap();
         let config = parse_project_config_toml(include_str!(
             "../../../examples/finitechat-native-mockup/finite.toml"
         ))
         .unwrap();
 
-        assert_eq!(request.config, config);
-        assert_eq!(request.config.project.slug, "finitechat-native");
-        assert_eq!(request.collaborators.len(), 1);
-        assert_eq!(request.collaborators[0].email, "skyler@example.com");
-        assert_eq!(request.collaborators[0].role, "editor");
+        assert_eq!(config.project.slug, "finitechat-native");
+        assert_eq!(config.outputs.len(), 1);
+    }
+
+    #[test]
+    fn view_target_url_supports_url_or_name() {
+        assert_eq!(
+            view_target_url("finitechat-native-mockup"),
+            "https://finitechat-native-mockup.finite.chat/"
+        );
+        assert_eq!(
+            append_url_path("https://finitechat-native-mockup.finite.chat/", "llms.txt"),
+            "https://finitechat-native-mockup.finite.chat/llms.txt"
+        );
     }
 }

@@ -15,19 +15,21 @@ use thiserror::Error;
 
 use finitesites_blob::{BlobError, BlobStore};
 use finitesites_proto::dto::{
-    GitAuthResponse, ProjectApplyRequest, ProjectCollaboratorRemoveResponse,
-    ProjectCollaboratorSummary, ProjectOutputSummary, SharingRequest, SharingResponse, SiteSummary,
+    GitAuthResponse, ProjectCollaboratorSummary, ProjectGrantRequest, ProjectGrantResponse,
+    ProjectInitRequest, ProjectInitResponse, ProjectListItem, ProjectListResponse,
+    ProjectOutputSummary, ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
+    SharingResponse, SiteSummary,
 };
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_EMAIL_KEYS_PER_EMAIL, MAX_EMAILS_PER_SHARING_REQUEST,
-    MAX_FILE_BYTES, MAX_PROJECT_COLLABORATORS, MAX_SHARES_PER_SITE, VIEWER_COOKIE_TTL_SECONDS,
+    MAX_FILE_BYTES, MAX_SHARES_PER_SITE, VIEWER_COOKIE_TTL_SECONDS,
 };
 use finitesites_proto::manifest::APP_BUNDLE_PATH;
 use finitesites_proto::{ManifestFile, ProtoError, PublishManifest, hex, ids, names};
 use finitesites_store::{
-    GitRefEventRecord, ProjectApplyStoreOutcome, ProjectCollaboratorApply, ProjectCollaboratorRole,
-    ProjectOutputApply, ProjectOutputRecord, ProjectRecord, SiteKind, SiteRecord, SiteStatus,
-    Store, StoreError, Visibility,
+    GitRefEventRecord, ProjectAccessRecord, ProjectCollaboratorApply, ProjectCollaboratorRecord,
+    ProjectCollaboratorRole, ProjectInitStoreOutcome, ProjectOutputApply, ProjectOutputRecord,
+    ProjectRecord, SiteKind, SiteRecord, SiteStatus, Store, StoreError, Visibility,
 };
 use sha2::{Digest, Sha256};
 
@@ -186,13 +188,13 @@ impl Engine {
 
     // ---- projects ----------------------------------------------------------
 
-    pub fn apply_project(
+    pub fn init_project(
         &mut self,
         owner_pubkey: &str,
-        request: &ProjectApplyRequest,
+        request: &ProjectInitRequest,
         git_remote_url: String,
         now: u64,
-    ) -> Result<finitesites_proto::dto::ProjectApplyResponse, EngineError> {
+    ) -> Result<ProjectInitResponse, EngineError> {
         assert!(hex::is_hex32(owner_pubkey));
         request.config.validate()?;
         if !self.store.has_publish_access(owner_pubkey, now)? {
@@ -200,49 +202,39 @@ impl Engine {
         }
         let finite_toml = request.config.to_toml_string()?;
         let outputs = output_apply_inputs(request);
-        let collaborators = collaborator_apply_inputs(request)?;
         if request.dry_run {
-            return self.dry_run_project_apply(
+            return self.dry_run_project_init(
                 owner_pubkey,
                 request,
                 &outputs,
-                &collaborators,
                 git_remote_url,
                 finite_toml,
             );
         }
 
-        let outcome = match self.store.apply_project(
-            owner_pubkey,
-            &request.config.project.slug,
-            &outputs,
-            &collaborators,
-            now,
-        ) {
-            Ok(outcome) => outcome,
-            Err(StoreError::Conflict("site name already claimed")) => {
-                return Err(EngineError::NameTaken);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        Ok(self.project_apply_response_from_store(
-            request.dry_run,
-            git_remote_url,
-            finite_toml,
-            outcome,
-        ))
+        let outcome =
+            match self
+                .store
+                .init_project(owner_pubkey, &request.config.project.slug, &outputs, now)
+            {
+                Ok(outcome) => outcome,
+                Err(StoreError::Conflict("site name already claimed")) => {
+                    return Err(EngineError::NameTaken);
+                }
+                Err(error) => return Err(error.into()),
+            };
+        self.project_init_response_from_store(request.dry_run, git_remote_url, finite_toml, outcome)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn dry_run_project_apply(
+    fn dry_run_project_init(
         &self,
         owner_pubkey: &str,
-        request: &ProjectApplyRequest,
+        request: &ProjectInitRequest,
         outputs: &[ProjectOutputApply],
-        collaborators: &[ProjectCollaboratorApply],
         git_remote_url: String,
         finite_toml: String,
-    ) -> Result<finitesites_proto::dto::ProjectApplyResponse, EngineError> {
+    ) -> Result<ProjectInitResponse, EngineError> {
         let existing_project = self.store.project_by_slug(&request.config.project.slug)?;
         let project_id = existing_project.as_ref().map(|project| project.id.clone());
         if let Some(project) = &existing_project {
@@ -266,12 +258,17 @@ impl Engine {
                 .iter()
                 .find(|record| record.output_id == output.output_id);
             if let Some(record) = existing {
-                if record.kind != output.kind || record.site_name != output.site_name {
+                if record.kind != output.kind
+                    || record.site_name != output.site_name
+                    || record.branch != output.branch
+                    || record.path != output.path
+                    || record.spa != output.spa
+                {
                     return Err(EngineError::Conflict(
-                        "project output kind or site name cannot change",
+                        "project output config cannot change during init",
                     ));
                 }
-                output_summaries.push(project_output_summary(record, false, &self.config));
+                output_summaries.push(self.project_output_summary(record, false)?);
                 continue;
             }
             if self.store.site_by_name(&output.site_name)?.is_some() {
@@ -283,6 +280,9 @@ impl Engine {
                 site_name: output.site_name.clone(),
                 site_id: None,
                 site_url: self.config.site_url(&output.site_name),
+                status: "planned".to_string(),
+                visibility: "private".to_string(),
+                active_version: None,
                 branch: output.branch.clone(),
                 path: output.path.clone(),
                 spa: output.spa,
@@ -290,19 +290,7 @@ impl Engine {
             });
         }
 
-        let mut collaborator_summaries = Vec::with_capacity(collaborators.len());
-        // Bounded by MAX_PROJECT_COLLABORATORS, checked in collaborator_apply_inputs.
-        for collaborator in collaborators {
-            let principal = self.store.principal_by_email(&collaborator.email)?;
-            collaborator_summaries.push(ProjectCollaboratorSummary {
-                principal_id: principal.map(|record| record.id),
-                email: collaborator.email.clone(),
-                role: collaborator.role.as_str().to_string(),
-                created: true,
-            });
-        }
-
-        Ok(finitesites_proto::dto::ProjectApplyResponse {
+        Ok(ProjectInitResponse {
             dry_run: true,
             project_id,
             slug: request.config.project.slug.clone(),
@@ -310,38 +298,21 @@ impl Engine {
             git_remote_url,
             finite_toml,
             outputs: output_summaries,
-            collaborators: collaborator_summaries,
-            invited_emails: Vec::new(),
         })
     }
 
-    fn project_apply_response_from_store(
+    fn project_init_response_from_store(
         &self,
         dry_run: bool,
         git_remote_url: String,
         finite_toml: String,
-        outcome: ProjectApplyStoreOutcome,
-    ) -> finitesites_proto::dto::ProjectApplyResponse {
-        let outputs = outcome
-            .outputs
-            .iter()
-            .map(|output| project_output_summary(&output.record, output.created, &self.config))
-            .collect();
-        let collaborators = outcome
-            .collaborators
-            .iter()
-            .map(|collaborator| ProjectCollaboratorSummary {
-                principal_id: Some(collaborator.record.principal_id.clone()),
-                email: collaborator
-                    .record
-                    .email
-                    .clone()
-                    .unwrap_or_else(|| String::from("")),
-                role: collaborator.record.role.as_str().to_string(),
-                created: collaborator.created,
-            })
-            .collect();
-        finitesites_proto::dto::ProjectApplyResponse {
+        outcome: ProjectInitStoreOutcome,
+    ) -> Result<ProjectInitResponse, EngineError> {
+        let mut outputs = Vec::with_capacity(outcome.outputs.len());
+        for output in &outcome.outputs {
+            outputs.push(self.project_output_summary(&output.record, output.created)?);
+        }
+        Ok(ProjectInitResponse {
             dry_run,
             project_id: Some(outcome.project.id),
             slug: outcome.project.slug,
@@ -349,18 +320,53 @@ impl Engine {
             git_remote_url,
             finite_toml,
             outputs,
-            collaborators,
-            invited_emails: Vec::new(),
-        }
+        })
     }
 
-    pub fn remove_project_collaborator(
+    pub fn grant_project(
+        &mut self,
+        owner_pubkey: &str,
+        project_slug: &str,
+        request: &ProjectGrantRequest,
+        now: u64,
+    ) -> Result<ProjectGrantResponse, EngineError> {
+        assert!(hex::is_hex32(owner_pubkey));
+        finitesites_proto::project_config::validate_project_slug(project_slug)?;
+        let project = self
+            .store
+            .project_by_slug(project_slug)?
+            .ok_or(EngineError::ProjectNotFound)?;
+        let owner_principal = self
+            .store
+            .principal_by_pubkey(owner_pubkey)?
+            .ok_or(EngineError::NotAuthorized)?;
+        let collaborator = collaborator_apply_input(request)?;
+        let applied = self
+            .store
+            .add_project_collaborator(&project.id, &owner_principal.id, &collaborator, now)
+            .map_err(|error| match error {
+                StoreError::Conflict("too many project collaborators") => {
+                    EngineError::TooManyProjectCollaborators
+                }
+                StoreError::Conflict("project owner principal mismatch") => {
+                    EngineError::NotAuthorized
+                }
+                other => EngineError::Store(other),
+            })?;
+        Ok(ProjectGrantResponse {
+            project_slug: project.slug,
+            collaborator: project_collaborator_summary(&applied.record, applied.created),
+            invited_emails: Vec::new(),
+        })
+    }
+
+    pub fn revoke_project(
         &mut self,
         owner_pubkey: &str,
         project_slug: &str,
         collaborator_email: &str,
         now: u64,
-    ) -> Result<ProjectCollaboratorRemoveResponse, EngineError> {
+    ) -> Result<ProjectRevokeResponse, EngineError> {
         assert!(hex::is_hex32(owner_pubkey));
         finitesites_proto::project_config::validate_project_slug(project_slug)?;
         let email = validate_email(collaborator_email)?;
@@ -381,11 +387,123 @@ impl Engine {
             &email,
             now,
         )?;
-        Ok(ProjectCollaboratorRemoveResponse {
+        Ok(ProjectRevokeResponse {
             project_slug: project.slug,
             email: removed.email,
             removed: removed.removed,
             revoked_git_credentials: removed.revoked_git_credentials,
+        })
+    }
+
+    pub fn project_status(
+        &self,
+        actor_pubkey: &str,
+        project_slug: &str,
+        git_remote_url: String,
+    ) -> Result<ProjectStatusResponse, EngineError> {
+        assert!(hex::is_hex32(actor_pubkey));
+        finitesites_proto::project_config::validate_project_slug(project_slug)?;
+        let principal = self
+            .store
+            .principal_by_pubkey(actor_pubkey)?
+            .ok_or(EngineError::NotAuthorized)?;
+        let access = self
+            .store
+            .project_access_by_slug(&principal.id, project_slug)?
+            .ok_or(EngineError::ProjectNotFound)?;
+        let outputs = self.project_output_summaries(&access.project.id)?;
+        let collaborators = self.project_collaborator_summaries(&access.project.id)?;
+        Ok(ProjectStatusResponse {
+            project_id: access.project.id,
+            slug: access.project.slug,
+            git_remote_url,
+            role: access.role.as_str().to_string(),
+            outputs,
+            collaborators,
+        })
+    }
+
+    pub fn project_list(
+        &self,
+        actor_pubkey: &str,
+        git_remote_base_url: &str,
+    ) -> Result<ProjectListResponse, EngineError> {
+        assert!(hex::is_hex32(actor_pubkey));
+        let Some(principal) = self.store.principal_by_pubkey(actor_pubkey)? else {
+            return Ok(ProjectListResponse {
+                projects: Vec::new(),
+            });
+        };
+        let access_records = self.store.projects_for_principal(&principal.id)?;
+        let mut projects = Vec::with_capacity(access_records.len());
+        for access in &access_records {
+            projects.push(self.project_list_item(access, git_remote_base_url)?);
+        }
+        Ok(ProjectListResponse { projects })
+    }
+
+    fn project_list_item(
+        &self,
+        access: &ProjectAccessRecord,
+        git_remote_base_url: &str,
+    ) -> Result<ProjectListItem, EngineError> {
+        Ok(ProjectListItem {
+            project_id: access.project.id.clone(),
+            slug: access.project.slug.clone(),
+            git_remote_url: format!("{git_remote_base_url}/{}.git", access.project.slug),
+            role: access.role.as_str().to_string(),
+            outputs: self.project_output_summaries(&access.project.id)?,
+        })
+    }
+
+    fn project_output_summaries(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ProjectOutputSummary>, EngineError> {
+        let records = self.store.project_outputs(project_id)?;
+        let mut outputs = Vec::with_capacity(records.len());
+        for record in &records {
+            outputs.push(self.project_output_summary(record, false)?);
+        }
+        Ok(outputs)
+    }
+
+    fn project_collaborator_summaries(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ProjectCollaboratorSummary>, EngineError> {
+        let records = self.store.active_project_collaborators(project_id)?;
+        let mut collaborators = Vec::with_capacity(records.len());
+        for record in &records {
+            collaborators.push(project_collaborator_summary(record, false));
+        }
+        Ok(collaborators)
+    }
+
+    fn project_output_summary(
+        &self,
+        record: &ProjectOutputRecord,
+        created: bool,
+    ) -> Result<ProjectOutputSummary, EngineError> {
+        let site = self
+            .store
+            .site_by_id(&record.site_id)?
+            .ok_or(StoreError::CorruptState(
+                "project output references missing site",
+            ))?;
+        Ok(ProjectOutputSummary {
+            output_id: record.output_id.clone(),
+            kind: record.kind.clone(),
+            site_name: record.site_name.clone(),
+            site_id: Some(record.site_id.clone()),
+            site_url: self.config.site_url(&record.site_name),
+            status: site.status.as_str().to_string(),
+            visibility: site.visibility.as_str().to_string(),
+            active_version: site.active_version_number,
+            branch: record.branch.clone(),
+            path: record.path.clone(),
+            spa: record.spa,
+            created,
         })
     }
 
@@ -1161,7 +1279,7 @@ impl Engine {
     }
 }
 
-fn output_apply_inputs(request: &ProjectApplyRequest) -> Vec<ProjectOutputApply> {
+fn output_apply_inputs(request: &ProjectInitRequest) -> Vec<ProjectOutputApply> {
     let mut outputs = Vec::with_capacity(request.config.outputs.len());
     // Bounded by ProjectConfig::validate.
     for (output_id, output) in &request.config.outputs {
@@ -1177,49 +1295,35 @@ fn output_apply_inputs(request: &ProjectApplyRequest) -> Vec<ProjectOutputApply>
     outputs
 }
 
-fn collaborator_apply_inputs(
-    request: &ProjectApplyRequest,
-) -> Result<Vec<ProjectCollaboratorApply>, EngineError> {
-    if request.collaborators.len() > MAX_PROJECT_COLLABORATORS as usize {
-        return Err(EngineError::TooManyProjectCollaborators);
-    }
-    let mut collaborators = Vec::with_capacity(request.collaborators.len());
-    // Bounded by MAX_PROJECT_COLLABORATORS above.
-    for collaborator in &request.collaborators {
-        let email = validate_email(&collaborator.email)?;
-        let role = match ProjectCollaboratorRole::parse(&collaborator.role) {
-            Ok(ProjectCollaboratorRole::Owner) => {
-                return Err(EngineError::Validation(
-                    "owner role is assigned by project ownership",
-                ));
-            }
-            Ok(role) => role,
-            Err(StoreError::Conflict(_)) => {
-                return Err(EngineError::Validation(
-                    "project collaborator role must be editor or viewer",
-                ));
-            }
-            Err(error) => return Err(EngineError::Store(error)),
-        };
-        collaborators.push(ProjectCollaboratorApply { email, role });
-    }
-    Ok(collaborators)
+fn collaborator_apply_input(
+    request: &ProjectGrantRequest,
+) -> Result<ProjectCollaboratorApply, EngineError> {
+    let email = validate_email(&request.email)?;
+    let role = match ProjectCollaboratorRole::parse(&request.role) {
+        Ok(ProjectCollaboratorRole::Owner) => {
+            return Err(EngineError::Validation(
+                "owner role is assigned by project ownership",
+            ));
+        }
+        Ok(role) => role,
+        Err(StoreError::Conflict(_)) => {
+            return Err(EngineError::Validation(
+                "project collaborator role must be editor or viewer",
+            ));
+        }
+        Err(error) => return Err(EngineError::Store(error)),
+    };
+    Ok(ProjectCollaboratorApply { email, role })
 }
 
-fn project_output_summary(
-    record: &ProjectOutputRecord,
+fn project_collaborator_summary(
+    record: &ProjectCollaboratorRecord,
     created: bool,
-    config: &EngineConfig,
-) -> ProjectOutputSummary {
-    ProjectOutputSummary {
-        output_id: record.output_id.clone(),
-        kind: record.kind.clone(),
-        site_name: record.site_name.clone(),
-        site_id: Some(record.site_id.clone()),
-        site_url: config.site_url(&record.site_name),
-        branch: record.branch.clone(),
-        path: record.path.clone(),
-        spa: record.spa,
+) -> ProjectCollaboratorSummary {
+    ProjectCollaboratorSummary {
+        principal_id: Some(record.principal_id.clone()),
+        email: record.email.clone().unwrap_or_default(),
+        role: record.role.as_str().to_string(),
         created,
     }
 }

@@ -12,9 +12,9 @@ use axum::routing::{get, post};
 
 use finitesites_engine::EngineError;
 use finitesites_proto::dto::{
-    ApiErrorBody, GitAuthRequest, GitAuthResponse, ProjectApplyRequest, ProjectApplyResponse,
-    ProjectCollaboratorRemoveRequest, ProjectCollaboratorRemoveResponse, SharingRequest,
-    SiteListResponse,
+    ApiErrorBody, GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse,
+    ProjectInitRequest, ProjectInitResponse, ProjectListResponse, ProjectRevokeRequest,
+    ProjectRevokeResponse, ProjectStatusResponse, SharingRequest,
 };
 use finitesites_proto::limits::MAX_API_BODY_BYTES;
 use finitesites_proto::{ProtoError, nip98};
@@ -27,14 +27,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/healthz", get(healthz))
         .route("/api/v1/email-auth/request", post(request_email_login))
         .route("/api/v1/email-auth/redeem", post(redeem_email_login))
-        .route("/api/v1/projects/apply", post(apply_project))
+        .route("/api/v1/projects", get(list_projects))
+        .route("/api/v1/projects/init", post(init_project))
+        .route("/api/v1/projects/{slug}", get(project_status))
+        .route("/api/v1/projects/{slug}/grant", post(grant_project))
+        .route("/api/v1/projects/{slug}/revoke", post(revoke_project))
         .route("/api/v1/projects/{slug}/git-auth", post(auth_git))
-        .route(
-            "/api/v1/projects/{slug}/collaborators/remove",
-            post(remove_project_collaborator),
-        )
-        .route("/api/v1/sites", get(list_sites))
-        .route("/api/v1/sites/{name}", get(site_status))
         .route("/api/v1/sites/{name}/sharing", post(set_sharing))
         .layer(DefaultBodyLimit::max(MAX_API_BODY_BYTES as usize))
         .fallback(api_not_found)
@@ -253,19 +251,18 @@ async fn redeem_email_login(
     }))
 }
 
-async fn apply_project(
+async fn init_project(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<InviteQuery>,
     original_uri: OriginalUri,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<ProjectApplyResponse>, ApiError> {
+) -> Result<Json<ProjectInitResponse>, ApiError> {
     let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: ProjectApplyRequest = parse_json_body(&body)?;
+    let request: ProjectInitRequest = parse_json_body(&body)?;
     let git_remote_url = git_remote_url(&state, &request.config.project.slug);
     let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let mut response = engine
-        .apply_project(&owner, &request, git_remote_url, now_unix())
+    let response = engine
+        .init_project(&owner, &request, git_remote_url, now_unix())
         .map_err(|error| {
             log_if_internal(&error);
             ApiError::from(error)
@@ -282,9 +279,84 @@ async fn apply_project(
         eprintln!("finitesitesd project repo setup failed: {error}");
         return Err(internal_error("git repository setup failure"));
     }
-    if query.send_invites && !response.dry_run {
-        send_project_collaborator_invites(&state, &mut response)?;
+    Ok(Json(response))
+}
+
+async fn list_projects(
+    State(state): State<Arc<AppState>>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+) -> Result<Json<ProjectListResponse>, ApiError> {
+    let actor = authenticate(&state, &headers, "GET", &original_uri, None)?;
+    let engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .project_list(&actor, &state.git_base_url)
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    Ok(Json(response))
+}
+
+async fn project_status(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+) -> Result<Json<ProjectStatusResponse>, ApiError> {
+    let actor = authenticate(&state, &headers, "GET", &original_uri, None)?;
+    let git_remote_url = git_remote_url(&state, &slug);
+    let engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .project_status(&actor, &slug, git_remote_url)
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    Ok(Json(response))
+}
+
+async fn grant_project(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    Query(query): Query<InviteQuery>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ProjectGrantResponse>, ApiError> {
+    let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: ProjectGrantRequest = parse_json_body(&body)?;
+    let mut response = {
+        let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+        engine
+            .grant_project(&owner, &slug, &request, now_unix())
+            .map_err(|error| {
+                log_if_internal(&error);
+                ApiError::from(error)
+            })?
+    };
+    if query.send_invites {
+        send_project_collaborator_invite(&state, &mut response)?;
     }
+    Ok(Json(response))
+}
+
+async fn revoke_project(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ProjectRevokeResponse>, ApiError> {
+    let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: ProjectRevokeRequest = parse_json_body(&body)?;
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .revoke_project(&owner, &slug, &request.email, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
     Ok(Json(response))
 }
 
@@ -314,56 +386,8 @@ async fn auth_git(
     Ok(Json(response))
 }
 
-async fn remove_project_collaborator(
-    State(state): State<Arc<AppState>>,
-    Path(slug): Path<String>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Json<ProjectCollaboratorRemoveResponse>, ApiError> {
-    let owner = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
-    let request: ProjectCollaboratorRemoveRequest = parse_json_body(&body)?;
-    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-    let response = engine
-        .remove_project_collaborator(&owner, &slug, &request.email, now_unix())
-        .map_err(|error| {
-            log_if_internal(&error);
-            ApiError::from(error)
-        })?;
-    Ok(Json(response))
-}
-
 fn git_remote_url(state: &AppState, slug: &str) -> String {
     format!("{}/{}.git", state.git_base_url, slug)
-}
-
-async fn list_sites(
-    State(state): State<Arc<AppState>>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-) -> Result<Json<SiteListResponse>, ApiError> {
-    let owner = authenticate(&state, &headers, "GET", &original_uri, None)?;
-    let engine = state.engine.lock().expect("engine mutex never poisoned");
-    let sites = engine.list_sites(&owner).map_err(|error| {
-        log_if_internal(&error);
-        ApiError::from(error)
-    })?;
-    Ok(Json(SiteListResponse { sites }))
-}
-
-async fn site_status(
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-    original_uri: OriginalUri,
-    headers: HeaderMap,
-) -> Result<Json<finitesites_proto::dto::SiteSummary>, ApiError> {
-    let actor = authenticate(&state, &headers, "GET", &original_uri, None)?;
-    let engine = state.engine.lock().expect("engine mutex never poisoned");
-    let summary = engine.site_status(&actor, &name).map_err(|error| {
-        log_if_internal(&error);
-        ApiError::from(error)
-    })?;
-    Ok(Json(summary))
 }
 
 async fn set_sharing(
@@ -444,45 +468,40 @@ struct InviteQuery {
     send_invites: bool,
 }
 
-fn send_project_collaborator_invites(
+fn send_project_collaborator_invite(
     state: &AppState,
-    response: &mut ProjectApplyResponse,
+    response: &mut ProjectGrantResponse,
 ) -> Result<(), ApiError> {
-    if response.collaborators.is_empty() {
-        return Ok(());
-    }
-
-    let mut tokens = Vec::with_capacity(response.collaborators.len());
-    {
+    let token = {
         let mut engine = state.engine.lock().expect("engine mutex never poisoned");
-        for collaborator in &response.collaborators {
-            let token = engine
-                .request_email_login(&collaborator.email, now_unix())
-                .map_err(|error| {
-                    log_if_internal(&error);
-                    ApiError::from(error)
-                })?;
-            tokens.push((token.email, collaborator.role.clone(), token.token));
-        }
-    }
-
-    for (email, role, token) in &tokens {
-        state
-            .mailer
-            .send_project_collaborator_invite(&ProjectCollaboratorInvite {
-                email,
-                project_slug: &response.slug,
-                role,
-                api_url: &state.api_url,
-                git_remote_url: &response.git_remote_url,
-                email_login_token: token,
-                outputs: &response.outputs,
-            })
+        engine
+            .request_email_login(&response.collaborator.email, now_unix())
             .map_err(|error| {
-                eprintln!("finitesitesd project collaborator invite mail error: {error}");
-                internal_error("mail delivery failure")
-            })?;
-    }
-    response.invited_emails = tokens.iter().map(|(email, _, _)| email.clone()).collect();
+                log_if_internal(&error);
+                ApiError::from(error)
+            })?
+    };
+
+    let git_remote_url = git_remote_url_for_base(&state.git_base_url, &response.project_slug);
+    state
+        .mailer
+        .send_project_collaborator_invite(&ProjectCollaboratorInvite {
+            email: &token.email,
+            project_slug: &response.project_slug,
+            role: &response.collaborator.role,
+            api_url: &state.api_url,
+            git_remote_url: &git_remote_url,
+            email_login_token: &token.token,
+            outputs: &[],
+        })
+        .map_err(|error| {
+            eprintln!("finitesitesd project collaborator invite mail error: {error}");
+            internal_error("mail delivery failure")
+        })?;
+    response.invited_emails = vec![token.email];
     Ok(())
+}
+
+fn git_remote_url_for_base(base: &str, slug: &str) -> String {
+    format!("{base}/{slug}.git")
 }

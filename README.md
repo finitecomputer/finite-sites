@@ -42,7 +42,7 @@ behind the same Project Repository model — see `docs/roadmap.md`.
 | `finitesites-proto` | nostr events, NIP-98, manifests, names, limits, DTOs |
 | `finitesites-blob` | content-addressed blob storage (filesystem; Garage/S3 seam) |
 | `finitesites-store` | SQLite registry: publish grants, projects, outputs, versions, shares, tokens |
-| `finitesites-engine` | all decisions: project apply/git deploy/share/view/magic links |
+| `finitesites-engine` | all decisions: project init/git deploy/share/view/magic links |
 | `finitesitesd` | the server: control-plane API + wildcard site serving + grant ops |
 | `fsite-cli` | agent-facing CLI (`fsite`) |
 
@@ -77,21 +77,23 @@ export FINITE_SITES_API=http://127.0.0.1:8787
 cargo run -p fsite-cli --bin fsite -- whoami
 cargo run -p finitesitesd -- allow --data .dev-data <npub from whoami> --note me
 
-# 3. create a Project Repository and site output
-cargo run -p fsite-cli --bin fsite -- project apply \
-  --json examples/project-applies/finitechat-native-mockup.json \
+# 3. create a Project Repository and site output from finite.toml
+cargo run -p fsite-cli --bin fsite -- project init \
+  --config examples/finitechat-native-mockup/finite.toml \
   --dry-run \
-  --output json \
-  --config examples/finitechat-native-mockup/finite.toml
-cargo run -p fsite-cli --bin fsite -- project apply \
-  --json examples/project-applies/finitechat-native-mockup.json \
-  --output json \
-  --config examples/finitechat-native-mockup/finite.toml
+  --output json
+cargo run -p fsite-cli --bin fsite -- project init \
+  --config examples/finitechat-native-mockup/finite.toml \
+  --output json
 
-# 4. verify the collaborator email, clone, commit deploy bytes, and push
-cargo run -p fsite-cli --bin fsite -- email-login skyler@example.com
+# 4. grant an editor email, verify it, clone, commit deploy bytes, and push
+cargo run -p fsite-cli --bin fsite -- project grant finitechat-native \
+  --email skyler@example.com \
+  --send-invite \
+  --output json
+cargo run -p fsite-cli --bin fsite -- auth login skyler@example.com
 # copy TOKEN_FROM_EMAIL from .dev-data/outbox/*.txt
-cargo run -p fsite-cli --bin fsite -- email-redeem skyler@example.com TOKEN_FROM_EMAIL
+cargo run -p fsite-cli --bin fsite -- auth redeem skyler@example.com TOKEN_FROM_EMAIL
 cargo run -p fsite-cli --bin fsite -- auth git finitechat-native --email skyler@example.com --store --output json
 git clone http://git.sites.localhost:8787/finitechat-native.git /tmp/finitechat-native
 rsync -a --delete examples/finitechat-native-mockup/ /tmp/finitechat-native/
@@ -100,11 +102,7 @@ git add finite.toml index.html
 git commit -m "Seed finitechat native mockup"
 git push origin main
 
-open http://finitechat-native-mockup.sites.localhost:8787/        # 401: private by default
-cargo run -p fsite-cli --bin fsite -- share finitechat-native-mockup --shared --add-email you@example.com --send-invite
-# request a link on the login page; the dev mailer writes it to
-# .dev-data/outbox/*.txt instead of sending real email
-cargo run -p fsite-cli --bin fsite -- share finitechat-native-mockup --public --yes-public
+open http://finitechat-native-mockup.sites.localhost:8787/        # private by default
 ```
 
 `*.sites.localhost` resolves to loopback in modern browsers; for curl pass
@@ -133,14 +131,14 @@ website surface for viewers.
 
 ## Collaborative editing
 
-Project Repositories are the preferred collaboration path. Create or update
-the Project and its site output through agent-safe JSON:
+Project Repositories are the preferred collaboration path. Initialize the
+Project and its site output from committed `finite.toml`:
 
 ```sh
 fsite describe workflow publish-static-site --output json
 fsite describe workflow project-config --output json
-fsite project apply --json project.json --dry-run --output json
-fsite project apply --json project.json --send-invite --output json
+fsite project init --config finite.toml --dry-run --output json
+fsite project init --config finite.toml --output json
 ```
 
 Minimal `finite.toml`:
@@ -161,8 +159,8 @@ An editor verifies their email, mints a scoped Git Credential, clones, edits,
 commits deploy bytes, and pushes the Deploy Branch:
 
 ```sh
-fsite email-login editor@example.com
-fsite email-redeem editor@example.com TOKEN_FROM_EMAIL
+fsite auth login editor@example.com
+fsite auth redeem editor@example.com TOKEN_FROM_EMAIL
 fsite auth git finitechat-native --email editor@example.com --store --output json
 git clone https://git.finite.chat/finitechat-native.git
 cd finitechat-native
@@ -183,15 +181,10 @@ surface. This revokes that Principal's active Git Credentials for the Project
 and is safe to replay:
 
 ```sh
-fsite project collaborator remove finitechat-native --email editor@example.com --output json
+fsite project revoke finitechat-native --email editor@example.com --output json
 ```
 
-Project Repository access is separate from output Visibility. If the email
-should also lose view access to a site output, remove the Share row too:
-
-```sh
-fsite share finitechat-native-mockup --remove-email editor@example.com
-```
+Project Repository access is separate from output Visibility.
 
 Pushing to a Project Deploy Branch updates committed output bytes; Finite
 Sites does not run builds.
@@ -203,12 +196,7 @@ Commit the surrounding source tree too when collaborators need it; keeping
 source out of the website output path does not mean keeping it out of the
 Project Repository.
 
-Owners can also email a view invite for a Project Output. This is separate
-from Project Repository edit access:
-
-```sh
-fsite share finitechat-native-mockup --shared --add-email viewer@example.com --send-invite
-```
+Output viewer sharing is separate from Project Repository edit access.
 
 For project-backed editable static sites, Finite Sites serves a virtual
 `/llms.txt` with git instructions when the active version did not publish
@@ -220,8 +208,9 @@ source.
 
 Agents should be able to learn `fsite` by interrogating `fsite` itself. Every
 capability exposed by the CLI should be discoverable through machine-readable
-help or describe commands, and every mutating project command should support
-structured JSON input, structured JSON output, and dry-run validation.
+help or describe commands. Project Config is structured `finite.toml` input;
+mutating commands expose structured JSON output, `project init` supports
+dry-run validation, and grant/revoke are replay-safe.
 `fsite --help` must point agents at the static-site happy path, and
 `fsite describe workflow publish-static-site --output json` is the canonical
 first command for creating a new static site Project Output.

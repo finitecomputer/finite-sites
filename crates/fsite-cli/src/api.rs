@@ -4,9 +4,9 @@
 
 use finitesites_proto::dto::{
     ApiErrorBody, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest, EmailRedeemResponse,
-    GitAuthRequest, GitAuthResponse, ProjectApplyRequest, ProjectApplyResponse,
-    ProjectCollaboratorRemoveRequest, ProjectCollaboratorRemoveResponse, SharingRequest,
-    SharingResponse, SiteListResponse, SiteSummary,
+    GitAuthRequest, GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse, ProjectInitRequest,
+    ProjectInitResponse, ProjectListResponse, ProjectRevokeRequest, ProjectRevokeResponse,
+    ProjectStatusResponse,
 };
 use finitesites_proto::nip98;
 
@@ -86,15 +86,64 @@ impl Client {
             .map_err(|error| CliError::Api(format!("invalid response from server: {error}")))
     }
 
-    pub fn apply_project(
+    pub fn init_project(
         &self,
         user: &KeyFile,
-        request: &ProjectApplyRequest,
-        send_invites: bool,
-    ) -> Result<ProjectApplyResponse, CliError> {
+        request: &ProjectInitRequest,
+    ) -> Result<ProjectInitResponse, CliError> {
         let body = serde_json::to_vec(request).expect("request serializes");
-        let path = format!("/api/v1/projects/apply{}", invite_query(send_invites));
-        self.request(user, "POST", &path, Some(&body))
+        self.request(user, "POST", "/api/v1/projects/init", Some(&body))
+    }
+
+    pub fn project_status(
+        &self,
+        key: &KeyFile,
+        project_slug: &str,
+    ) -> Result<ProjectStatusResponse, CliError> {
+        self.request(
+            key,
+            "GET",
+            &format!("/api/v1/projects/{project_slug}"),
+            None,
+        )
+    }
+
+    pub fn project_list(&self, key: &KeyFile) -> Result<ProjectListResponse, CliError> {
+        self.request(key, "GET", "/api/v1/projects", None)
+    }
+
+    pub fn grant_project(
+        &self,
+        key: &KeyFile,
+        project_slug: &str,
+        request: &ProjectGrantRequest,
+        send_invite: bool,
+    ) -> Result<ProjectGrantResponse, CliError> {
+        let body = serde_json::to_vec(request).expect("request serializes");
+        self.request(
+            key,
+            "POST",
+            &format!(
+                "/api/v1/projects/{project_slug}/grant{}",
+                invite_query(send_invite)
+            ),
+            Some(&body),
+        )
+    }
+
+    pub fn revoke_project(
+        &self,
+        key: &KeyFile,
+        project_slug: &str,
+        request: &ProjectRevokeRequest,
+    ) -> Result<ProjectRevokeResponse, CliError> {
+        let body = serde_json::to_vec(request).expect("request serializes");
+        self.request(
+            key,
+            "POST",
+            &format!("/api/v1/projects/{project_slug}/revoke"),
+            Some(&body),
+        )
     }
 
     pub fn auth_git(
@@ -108,45 +157,6 @@ impl Client {
             key,
             "POST",
             &format!("/api/v1/projects/{project_slug}/git-auth"),
-            Some(&body),
-        )
-    }
-
-    pub fn remove_project_collaborator(
-        &self,
-        key: &KeyFile,
-        project_slug: &str,
-        request: &ProjectCollaboratorRemoveRequest,
-    ) -> Result<ProjectCollaboratorRemoveResponse, CliError> {
-        let body = serde_json::to_vec(request).expect("request serializes");
-        self.request(
-            key,
-            "POST",
-            &format!("/api/v1/projects/{project_slug}/collaborators/remove"),
-            Some(&body),
-        )
-    }
-
-    pub fn list_sites(&self, user: &KeyFile) -> Result<SiteListResponse, CliError> {
-        self.request(user, "GET", "/api/v1/sites", None)
-    }
-
-    pub fn site_status(&self, key: &KeyFile, name: &str) -> Result<SiteSummary, CliError> {
-        self.request(key, "GET", &format!("/api/v1/sites/{name}"), None)
-    }
-
-    pub fn set_sharing(
-        &self,
-        key: &KeyFile,
-        name: &str,
-        request: &SharingRequest,
-        send_invites: bool,
-    ) -> Result<SharingResponse, CliError> {
-        let body = serde_json::to_vec(request).expect("request serializes");
-        self.request(
-            key,
-            "POST",
-            &format!("/api/v1/sites/{name}/sharing{}", invite_query(send_invites)),
             Some(&body),
         )
     }

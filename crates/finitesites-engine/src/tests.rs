@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use finitesites_blob::BlobStore;
 use std::collections::BTreeMap;
 
-use finitesites_proto::dto::{ProjectApplyRequest, ProjectCollaboratorSpec, SharingRequest};
+use finitesites_proto::dto::{ProjectGrantRequest, ProjectInitRequest, SharingRequest};
 use finitesites_proto::limits::{LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE};
 use finitesites_proto::project_config::{
     ProjectConfig, ProjectOutputConfig, ProjectOutputKind, ProjectSection,
@@ -57,7 +57,7 @@ fn output_file(path: &str, bytes: &[u8]) -> (ManifestFile, Vec<u8>) {
     )
 }
 
-fn project_request(slug: &str, site_name: &str, spa: bool, dry_run: bool) -> ProjectApplyRequest {
+fn project_request(slug: &str, site_name: &str, spa: bool, dry_run: bool) -> ProjectInitRequest {
     let mut outputs = BTreeMap::new();
     outputs.insert(
         "site".to_string(),
@@ -69,7 +69,7 @@ fn project_request(slug: &str, site_name: &str, spa: bool, dry_run: bool) -> Pro
             spa,
         },
     );
-    ProjectApplyRequest {
+    ProjectInitRequest {
         config: ProjectConfig {
             project: ProjectSection {
                 slug: slug.to_string(),
@@ -77,10 +77,6 @@ fn project_request(slug: &str, site_name: &str, spa: bool, dry_run: bool) -> Pro
             outputs,
         },
         dry_run,
-        collaborators: vec![ProjectCollaboratorSpec {
-            email: "skyler@example.com".to_string(),
-            role: "editor".to_string(),
-        }],
     }
 }
 
@@ -88,9 +84,9 @@ fn remote(slug: &str) -> String {
     format!("https://git.finite.chat/{slug}.git")
 }
 
-fn apply_project_site(engine: &mut Engine, slug: &str, site_name: &str, spa: bool) -> String {
+fn init_project_site(engine: &mut Engine, slug: &str, site_name: &str, spa: bool) -> String {
     let response = engine
-        .apply_project(
+        .init_project(
             OWNER,
             &project_request(slug, site_name, spa, false),
             remote(slug),
@@ -106,7 +102,7 @@ fn publish_project_site(
     site_name: &str,
     spa: bool,
 ) -> crate::FinalizeOutcome {
-    let site_id = apply_project_site(engine, slug, site_name, spa);
+    let site_id = init_project_site(engine, slug, site_name, spa);
     let index: &[u8] = b"<h1>hello</h1>";
     let style: &[u8] = b"body { color: red }";
     engine
@@ -132,11 +128,11 @@ fn verify_email_key(engine: &mut Engine, email: &str, pubkey: &str) {
 // ---- projects -------------------------------------------------------------
 
 #[test]
-fn project_apply_dry_run_create_and_replay() {
+fn project_init_dry_run_create_and_replay() {
     let mut fx = fixture();
     let dry_run = fx
         .engine
-        .apply_project(
+        .init_project(
             OWNER,
             &project_request("finitechat-native", "finitechat-native-mockup", false, true),
             remote("finitechat-native"),
@@ -156,7 +152,7 @@ fn project_apply_dry_run_create_and_replay() {
 
     let created = fx
         .engine
-        .apply_project(
+        .init_project(
             OWNER,
             &project_request(
                 "finitechat-native",
@@ -172,7 +168,6 @@ fn project_apply_dry_run_create_and_replay() {
     assert!(created.created);
     assert!(created.project_id.is_some());
     assert!(created.outputs[0].created);
-    assert_eq!(created.collaborators[0].email, "skyler@example.com");
     let site = fx
         .engine
         .resolve_site("finitechat-native-mockup")
@@ -183,7 +178,7 @@ fn project_apply_dry_run_create_and_replay() {
 
     let replay = fx
         .engine
-        .apply_project(
+        .init_project(
             OWNER,
             &project_request(
                 "finitechat-native",
@@ -201,9 +196,9 @@ fn project_apply_dry_run_create_and_replay() {
 }
 
 #[test]
-fn project_apply_rejects_ungranted_owner_taken_name_and_bad_role() {
+fn project_init_rejects_ungranted_owner_and_taken_name() {
     let mut fx = fixture();
-    let ungranted = fx.engine.apply_project(
+    let ungranted = fx.engine.init_project(
         OTHER_OWNER,
         &project_request("other", "other-site", false, false),
         remote("other"),
@@ -211,32 +206,82 @@ fn project_apply_rejects_ungranted_owner_taken_name_and_bad_role() {
     );
     assert!(matches!(ungranted, Err(EngineError::NotAllowlisted)));
 
-    apply_project_site(&mut fx.engine, "first", "shared-name", false);
+    init_project_site(&mut fx.engine, "first", "shared-name", false);
     fx.engine
         .store_mut()
         .allow_pubkey(OTHER_OWNER, "other", NOW)
         .unwrap();
-    let taken = fx.engine.apply_project(
+    let taken = fx.engine.init_project(
         OTHER_OWNER,
         &project_request("second", "shared-name", false, false),
         remote("second"),
         NOW + 1,
     );
     assert!(matches!(taken, Err(EngineError::NameTaken)));
+}
 
-    let mut bad_role = project_request("bad-role", "bad-role-site", false, false);
-    bad_role.collaborators[0].role = "owner".to_string();
-    let result = fx
+#[test]
+fn project_grant_rejects_bad_role_and_replays() {
+    let mut fx = fixture();
+    fx.engine
+        .init_project(
+            OWNER,
+            &project_request(
+                "finitechat-native",
+                "finitechat-native-mockup",
+                false,
+                false,
+            ),
+            remote("finitechat-native"),
+            NOW,
+        )
+        .unwrap();
+
+    let bad_role = fx.engine.grant_project(
+        OWNER,
+        "finitechat-native",
+        &ProjectGrantRequest {
+            email: "skyler@example.com".to_string(),
+            role: "owner".to_string(),
+        },
+        NOW + 1,
+    );
+    assert!(matches!(bad_role, Err(EngineError::Validation(_))));
+
+    let granted = fx
         .engine
-        .apply_project(OWNER, &bad_role, remote("bad-role"), NOW + 2);
-    assert!(matches!(result, Err(EngineError::Validation(_))));
+        .grant_project(
+            OWNER,
+            "finitechat-native",
+            &ProjectGrantRequest {
+                email: "skyler@example.com".to_string(),
+                role: "editor".to_string(),
+            },
+            NOW + 2,
+        )
+        .unwrap();
+    assert!(granted.collaborator.created);
+
+    let replay = fx
+        .engine
+        .grant_project(
+            OWNER,
+            "finitechat-native",
+            &ProjectGrantRequest {
+                email: "skyler@example.com".to_string(),
+                role: "editor".to_string(),
+            },
+            NOW + 3,
+        )
+        .unwrap();
+    assert!(!replay.collaborator.created);
 }
 
 #[test]
 fn git_credential_requires_verified_editor_and_honors_revocation() {
     let mut fx = fixture();
     fx.engine
-        .apply_project(
+        .init_project(
             OWNER,
             &project_request(
                 "finitechat-native",
@@ -288,6 +333,17 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
     );
     assert!(matches!(stranger_native, Err(EngineError::NotAuthorized)));
 
+    fx.engine
+        .grant_project(
+            OWNER,
+            "finitechat-native",
+            &ProjectGrantRequest {
+                email: "skyler@example.com".to_string(),
+                role: "editor".to_string(),
+            },
+            NOW + 2,
+        )
+        .unwrap();
     verify_email_key(&mut fx.engine, "skyler@example.com", OTHER_OWNER);
     let credential = fx
         .engine
@@ -333,7 +389,7 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
 
     let removed = fx
         .engine
-        .remove_project_collaborator(OWNER, "finitechat-native", "skyler@example.com", NOW + 6)
+        .revoke_project(OWNER, "finitechat-native", "skyler@example.com", NOW + 6)
         .unwrap();
     assert!(removed.removed);
     assert_eq!(removed.revoked_git_credentials, 1);
@@ -348,7 +404,7 @@ fn git_credential_requires_verified_editor_and_honors_revocation() {
 
     let replay = fx
         .engine
-        .remove_project_collaborator(OWNER, "finitechat-native", "skyler@example.com", NOW + 8)
+        .revoke_project(OWNER, "finitechat-native", "skyler@example.com", NOW + 8)
         .unwrap();
     assert!(!replay.removed);
     assert_eq!(replay.revoked_git_credentials, 0);
@@ -399,7 +455,7 @@ fn project_output_version_publishes_and_serves_content() {
 #[test]
 fn project_output_second_version_replaces_active_snapshot() {
     let mut fx = fixture();
-    let site_id = apply_project_site(&mut fx.engine, "hello-project", "hello", false);
+    let site_id = init_project_site(&mut fx.engine, "hello-project", "hello", false);
     fx.engine
         .commit_project_output_version(
             &site_id,
@@ -445,7 +501,7 @@ fn project_output_version_replays_by_git_ref_event_id_after_ack_crash() {
     let mut fx = fixture();
     let created = fx
         .engine
-        .apply_project(
+        .init_project(
             OWNER,
             &project_request(
                 "finitechat-native",
@@ -539,7 +595,7 @@ fn project_output_version_replays_by_git_ref_event_id_after_ack_crash() {
 #[test]
 fn project_output_deploy_rejects_bad_or_unauthorized_bytes() {
     let mut fx = fixture();
-    let site_id = apply_project_site(&mut fx.engine, "hello-project", "hello", false);
+    let site_id = init_project_site(&mut fx.engine, "hello-project", "hello", false);
 
     fx.engine.store_mut().disallow_pubkey(OWNER).unwrap();
     let revoked = fx.engine.commit_project_output_version(
@@ -784,7 +840,7 @@ fn shared_site_full_magic_link_flow() {
 #[test]
 fn public_private_and_unpublished_view_paths() {
     let mut fx = fixture();
-    let site_id = apply_project_site(&mut fx.engine, "hello-project", "hello", false);
+    let site_id = init_project_site(&mut fx.engine, "hello-project", "hello", false);
     let unpublished = fx.engine.resolve_site("hello").unwrap().unwrap();
     assert_eq!(
         fx.engine.view_access(&unpublished, None, NOW).unwrap(),
@@ -894,7 +950,7 @@ fn resolve_rejects_invalid_labels() {
 #[test]
 fn spa_project_output_routes_unknown_paths_to_index() {
     let mut fx = fixture();
-    let site_id = apply_project_site(&mut fx.engine, "spa-project", "spa-site", true);
+    let site_id = init_project_site(&mut fx.engine, "spa-project", "spa-site", true);
     fx.engine
         .commit_project_output_version(
             &site_id,
@@ -930,8 +986,7 @@ fn generated_llms_txt_only_when_project_output_has_no_authored_file() {
     let site = fx.engine.resolve_site("hello").unwrap().unwrap();
     assert!(fx.engine.should_generate_llms_txt(&site).unwrap());
 
-    let authored_site_id =
-        apply_project_site(&mut fx.engine, "authored-project", "authored", false);
+    let authored_site_id = init_project_site(&mut fx.engine, "authored-project", "authored", false);
     fx.engine
         .commit_project_output_version(
             &authored_site_id,

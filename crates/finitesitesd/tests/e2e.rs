@@ -16,9 +16,9 @@ use finitesites_blob::BlobStore;
 use finitesites_engine::{Engine, EngineConfig};
 use finitesites_proto::dto::{
     EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest, EmailRedeemResponse, GitAuthRequest,
-    GitAuthResponse, ProjectApplyRequest, ProjectApplyResponse, ProjectCollaboratorRemoveRequest,
-    ProjectCollaboratorRemoveResponse, ProjectCollaboratorSpec, SharingRequest, SharingResponse,
-    SiteSummary,
+    GitAuthResponse, ProjectGrantRequest, ProjectGrantResponse, ProjectInitRequest,
+    ProjectInitResponse, ProjectOutputSummary, ProjectRevokeRequest, ProjectRevokeResponse,
+    ProjectStatusResponse, SharingRequest, SharingResponse,
 };
 use finitesites_proto::nip98;
 use finitesites_proto::project_config::{
@@ -218,9 +218,9 @@ fn outbox_email_token(outbox: &Path) -> String {
     let content = std::fs::read_to_string(path).unwrap();
     content
         .lines()
-        .find_map(|line| line.trim().strip_prefix("fsite email-redeem "))
+        .find_map(|line| line.trim().strip_prefix("fsite auth redeem "))
         .and_then(|rest| rest.split_whitespace().nth(1))
-        .expect("mail contains an email-redeem command")
+        .expect("mail contains an auth redeem command")
         .to_string()
 }
 
@@ -284,21 +284,30 @@ fn try_git(args: &[&str], cwd: Option<&Path>) -> bool {
     command.status().unwrap().success()
 }
 
-fn wait_for_active_version(server: &TestServer, name: &str, expected: Option<u32>) -> SiteSummary {
-    let mut last: Option<SiteSummary> = None;
+fn wait_for_active_version(
+    server: &TestServer,
+    name: &str,
+    expected: Option<u32>,
+) -> ProjectOutputSummary {
+    let mut last: Option<ProjectOutputSummary> = None;
     // Bounded wait: the receive-pack request has already completed; this only
     // waits for the out-of-band reconciler spawned after that durable event.
     for _ in 0..60 {
-        let summary: SiteSummary = json_body(
+        let status: ProjectStatusResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "GET",
-                    &format!("/api/v1/sites/{name}"),
+                    "/api/v1/projects/finitechat-native",
                     None,
                 )
                 .unwrap(),
         );
+        let summary = status
+            .outputs
+            .into_iter()
+            .find(|output| output.site_name == name)
+            .expect("project status contains output");
         if summary.active_version == expected {
             return summary;
         }
@@ -310,7 +319,25 @@ fn wait_for_active_version(server: &TestServer, name: &str, expected: Option<u32
     summary
 }
 
-fn project_apply_request(dry_run: bool) -> ProjectApplyRequest {
+fn project_output_status(server: &TestServer, name: &str) -> ProjectOutputSummary {
+    let status: ProjectStatusResponse = json_body(
+        server
+            .signed(
+                &user_secret(),
+                "GET",
+                "/api/v1/projects/finitechat-native",
+                None,
+            )
+            .unwrap(),
+    );
+    status
+        .outputs
+        .into_iter()
+        .find(|output| output.site_name == name)
+        .expect("project status contains output")
+}
+
+fn project_init_request(dry_run: bool) -> ProjectInitRequest {
     let mut outputs = BTreeMap::new();
     outputs.insert(
         "mockup".to_string(),
@@ -322,7 +349,7 @@ fn project_apply_request(dry_run: bool) -> ProjectApplyRequest {
             spa: false,
         },
     );
-    ProjectApplyRequest {
+    ProjectInitRequest {
         config: ProjectConfig {
             project: ProjectSection {
                 slug: "finitechat-native".to_string(),
@@ -330,14 +357,26 @@ fn project_apply_request(dry_run: bool) -> ProjectApplyRequest {
             outputs,
         },
         dry_run,
-        collaborators: vec![ProjectCollaboratorSpec {
-            email: "skyler@example.com".to_string(),
-            role: "editor".to_string(),
-        }],
     }
 }
 
 fn mint_skyler_git_credential(server: &TestServer) -> GitAuthResponse {
+    let grant_body = serde_json::to_vec(&ProjectGrantRequest {
+        email: "skyler@example.com".into(),
+        role: "editor".into(),
+    })
+    .unwrap();
+    let _: ProjectGrantResponse = json_body(
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v1/projects/finitechat-native/grant",
+                Some(&grant_body),
+            )
+            .unwrap(),
+    );
+
     let login_body = serde_json::to_vec(&EmailLoginRequest {
         email: "skyler@example.com".into(),
     })
@@ -464,28 +503,28 @@ async fn full_publish_share_and_view_flow() {
             .call();
         assert!(health.is_ok());
 
-        let apply_body = serde_json::to_vec(&project_apply_request(false)).unwrap();
+        let apply_body = serde_json::to_vec(&project_init_request(false)).unwrap();
         let denied = server.signed(
             &stranger_secret(),
             "POST",
-            "/api/v1/projects/apply",
+            "/api/v1/projects/init",
             Some(&apply_body),
         );
         assert!(matches!(denied, Err(ureq::Error::Status(403, _))));
 
         let no_auth = server
             .agent
-            .post(&format!("{}/api/v1/projects/apply", server.api_url))
+            .post(&format!("{}/api/v1/projects/init", server.api_url))
             .set("Authorization", "Nostr bm90LWFuLWV2ZW50")
             .send_bytes(&apply_body);
         assert!(matches!(no_auth, Err(ureq::Error::Status(401, _))));
 
-        let created: ProjectApplyResponse = json_body(
+        let created: ProjectInitResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/projects/apply",
+                    "/api/v1/projects/init",
                     Some(&apply_body),
                 )
                 .unwrap(),
@@ -659,15 +698,10 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
     let port = server.port();
 
     let task = tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        let created: ProjectApplyResponse = json_body(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
         let credential = mint_skyler_git_credential(&server);
@@ -697,18 +731,8 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
             )
             .unwrap_err();
         assert!(matches!(invalid_invite, ureq::Error::Status(400, _)));
-        let unchanged: SiteSummary = json_body(
-            server
-                .signed(
-                    &user_secret(),
-                    "GET",
-                    "/api/v1/sites/finitechat-native-mockup",
-                    None,
-                )
-                .unwrap(),
-        );
+        let unchanged = project_output_status(&server, "finitechat-native-mockup");
         assert_eq!(unchanged.visibility, "private");
-        assert!(unchanged.shared_emails.is_empty());
         assert!(outbox_bodies(&server.outbox).is_empty());
 
         let share_body = serde_json::to_vec(&SharingRequest {
@@ -760,18 +784,18 @@ async fn share_send_invite_emails_viewer_magic_link_and_replays() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn project_apply_and_git_auth_flow() {
+async fn project_init_and_git_auth_flow() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
 
     let task = tokio::task::spawn_blocking(move || {
-        let dry_body = serde_json::to_vec(&project_apply_request(true)).unwrap();
-        let dry_run: ProjectApplyResponse = json_body(
+        let dry_body = serde_json::to_vec(&project_init_request(true)).unwrap();
+        let dry_run: ProjectInitResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/projects/apply",
+                    "/api/v1/projects/init",
                     Some(&dry_body),
                 )
                 .unwrap(),
@@ -788,15 +812,10 @@ async fn project_apply_and_git_auth_flow() {
         );
         assert!(dry_run.finite_toml.contains("[outputs.mockup]"));
 
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        let created: ProjectApplyResponse = json_body(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
         assert!(!created.dry_run);
@@ -805,14 +824,9 @@ async fn project_apply_and_git_auth_flow() {
         assert!(created.outputs[0].created);
         assert_eq!(created.outputs[0].site_name, "finitechat-native-mockup");
 
-        let replay: ProjectApplyResponse = json_body(
+        let replay: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
         assert!(!replay.created);
@@ -857,6 +871,23 @@ async fn project_apply_and_git_auth_flow() {
             )
             .unwrap_err();
         assert!(matches!(unverified, ureq::Error::Status(403, _)));
+
+        let grant_body = serde_json::to_vec(&ProjectGrantRequest {
+            email: "skyler@example.com".into(),
+            role: "editor".into(),
+        })
+        .unwrap();
+        let grant: ProjectGrantResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/grant",
+                    Some(&grant_body),
+                )
+                .unwrap(),
+        );
+        assert!(grant.collaborator.created);
 
         let login_body = serde_json::to_vec(&EmailLoginRequest {
             email: "skyler@example.com".into(),
@@ -909,30 +940,43 @@ async fn project_apply_and_git_auth_flow() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn project_apply_send_invite_emails_collaborator_and_replays() {
+async fn project_grant_send_invite_emails_collaborator_and_replays() {
     let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
     let server = TestServer::start(&user_pubkey).await;
 
     let task = tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        let created: ProjectApplyResponse = json_body(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply?send_invites=true",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
         assert!(!created.dry_run);
         assert!(created.created);
-        assert_eq!(created.collaborators.len(), 1);
-        assert_eq!(created.invited_emails, vec!["skyler@example.com"]);
+        assert!(created.outputs[0].created);
+
+        let grant_body = serde_json::to_vec(&ProjectGrantRequest {
+            email: "skyler@example.com".to_string(),
+            role: "editor".to_string(),
+        })
+        .unwrap();
+        let grant: ProjectGrantResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    "/api/v1/projects/finitechat-native/grant?send_invites=true",
+                    Some(&grant_body),
+                )
+                .unwrap(),
+        );
+        assert_eq!(grant.collaborator.email, "skyler@example.com");
+        assert!(grant.collaborator.created);
+        assert_eq!(grant.invited_emails, vec!["skyler@example.com"]);
         let bodies = outbox_bodies(&server.outbox);
         assert_eq!(bodies.len(), 1);
         assert!(bodies[0].contains("You've been invited to collaborate on finitechat-native"));
-        assert!(bodies[0].contains("fsite email-redeem skyler@example.com"));
+        assert!(bodies[0].contains("fsite auth redeem skyler@example.com"));
         assert!(bodies[0].contains(
             "fsite auth git finitechat-native --email skyler@example.com --store --output json"
         ));
@@ -940,21 +984,19 @@ async fn project_apply_send_invite_emails_collaborator_and_replays() {
             "git clone http://git.{BASE_DOMAIN}:{}/finitechat-native.git",
             server.port()
         )));
-        assert!(bodies[0].contains("finitechat-native-mockup"));
 
         clear_outbox(&server.outbox);
-        let replay: ProjectApplyResponse = json_body(
+        let replay: ProjectGrantResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/projects/apply?send_invites=true",
-                    Some(&body),
+                    "/api/v1/projects/finitechat-native/grant?send_invites=true",
+                    Some(&grant_body),
                 )
                 .unwrap(),
         );
-        assert!(!replay.created);
-        assert_eq!(replay.collaborators.len(), 1);
+        assert!(!replay.collaborator.created);
         assert_eq!(replay.invited_emails, vec!["skyler@example.com"]);
         assert_eq!(outbox_bodies(&server.outbox).len(), 1);
     });
@@ -967,58 +1009,29 @@ async fn project_collaborator_remove_revokes_git_credentials() {
     let server = TestServer::start(&user_pubkey).await;
 
     let task = tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        json_body::<ProjectApplyResponse>(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        json_body::<ProjectInitResponse>(
+            server
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
+                .unwrap(),
+        );
+        let grant_body = serde_json::to_vec(&ProjectGrantRequest {
+            email: "skyler@example.com".into(),
+            role: "editor".into(),
+        })
+        .unwrap();
+        json_body::<ProjectGrantResponse>(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
+                    "/api/v1/projects/finitechat-native/grant",
+                    Some(&grant_body),
                 )
                 .unwrap(),
         );
 
-        let login_body = serde_json::to_vec(&EmailLoginRequest {
-            email: "skyler@example.com".into(),
-        })
-        .unwrap();
-        server
-            .agent
-            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
-            .set("Content-Type", "application/json")
-            .send_bytes(&login_body)
-            .unwrap();
-        let token = outbox_email_token(&server.outbox);
-        clear_outbox(&server.outbox);
-        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
-            email: "skyler@example.com".into(),
-            token,
-        })
-        .unwrap();
-        server
-            .signed(
-                &stranger_secret(),
-                "POST",
-                "/api/v1/email-auth/redeem",
-                Some(&redeem_body),
-            )
-            .unwrap();
-
-        let auth_body = serde_json::to_vec(&GitAuthRequest {
-            email: Some("skyler@example.com".into()),
-        })
-        .unwrap();
-        let credential: GitAuthResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    "/api/v1/projects/finitechat-native/git-auth",
-                    Some(&auth_body),
-                )
-                .unwrap(),
-        );
+        let credential = mint_skyler_git_credential(&server);
         let remote = format!(
             "http://{}:{}@127.0.0.1:{}/finitechat-native.git",
             credential.username,
@@ -1037,7 +1050,7 @@ async fn project_collaborator_remove_revokes_git_credentials() {
             Some(dir.path()),
         );
 
-        let remove_body = serde_json::to_vec(&ProjectCollaboratorRemoveRequest {
+        let remove_body = serde_json::to_vec(&ProjectRevokeRequest {
             email: "skyler@example.com".into(),
         })
         .unwrap();
@@ -1045,18 +1058,18 @@ async fn project_collaborator_remove_revokes_git_credentials() {
             .signed(
                 &stranger_secret(),
                 "POST",
-                "/api/v1/projects/finitechat-native/collaborators/remove",
+                "/api/v1/projects/finitechat-native/revoke",
                 Some(&remove_body),
             )
             .unwrap_err();
         assert!(matches!(stranger_remove, ureq::Error::Status(403, _)));
 
-        let removed: ProjectCollaboratorRemoveResponse = json_body(
+        let removed: ProjectRevokeResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/projects/finitechat-native/collaborators/remove",
+                    "/api/v1/projects/finitechat-native/revoke",
                     Some(&remove_body),
                 )
                 .unwrap(),
@@ -1080,17 +1093,22 @@ async fn project_collaborator_remove_revokes_git_credentials() {
                 &stranger_secret(),
                 "POST",
                 "/api/v1/projects/finitechat-native/git-auth",
-                Some(&auth_body),
+                Some(
+                    &serde_json::to_vec(&GitAuthRequest {
+                        email: Some("skyler@example.com".into()),
+                    })
+                    .unwrap(),
+                ),
             )
             .unwrap_err();
         assert!(matches!(auth_after_remove, ureq::Error::Status(403, _)));
 
-        let replay: ProjectCollaboratorRemoveResponse = json_body(
+        let replay: ProjectRevokeResponse = json_body(
             server
                 .signed(
                     &user_secret(),
                     "POST",
-                    "/api/v1/projects/finitechat-native/collaborators/remove",
+                    "/api/v1/projects/finitechat-native/revoke",
                     Some(&remove_body),
                 )
                 .unwrap(),
@@ -1107,58 +1125,14 @@ async fn git_http_clone_and_push_with_minted_credential() {
     let server = TestServer::start(&user_pubkey).await;
 
     let task = tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        let created: ProjectApplyResponse = json_body(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
 
-        let login_body = serde_json::to_vec(&EmailLoginRequest {
-            email: "skyler@example.com".into(),
-        })
-        .unwrap();
-        server
-            .agent
-            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
-            .set("Content-Type", "application/json")
-            .send_bytes(&login_body)
-            .unwrap();
-        let token = outbox_email_token(&server.outbox);
-        clear_outbox(&server.outbox);
-        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
-            email: "skyler@example.com".into(),
-            token,
-        })
-        .unwrap();
-        server
-            .signed(
-                &stranger_secret(),
-                "POST",
-                "/api/v1/email-auth/redeem",
-                Some(&redeem_body),
-            )
-            .unwrap();
-
-        let auth_body = serde_json::to_vec(&GitAuthRequest {
-            email: Some("skyler@example.com".into()),
-        })
-        .unwrap();
-        let credential: GitAuthResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    "/api/v1/projects/finitechat-native/git-auth",
-                    Some(&auth_body),
-                )
-                .unwrap(),
-        );
+        let credential = mint_skyler_git_credential(&server);
 
         let dir = tempfile::tempdir().unwrap();
         let remote = format!(
@@ -1230,58 +1204,14 @@ async fn git_ref_event_reconciles_after_restart_boundary() {
     let server = TestServer::start_with_git_auto_reconcile(&user_pubkey, false).await;
 
     let task = tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        let created: ProjectApplyResponse = json_body(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
 
-        let login_body = serde_json::to_vec(&EmailLoginRequest {
-            email: "skyler@example.com".into(),
-        })
-        .unwrap();
-        server
-            .agent
-            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
-            .set("Content-Type", "application/json")
-            .send_bytes(&login_body)
-            .unwrap();
-        let token = outbox_email_token(&server.outbox);
-        clear_outbox(&server.outbox);
-        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
-            email: "skyler@example.com".into(),
-            token,
-        })
-        .unwrap();
-        server
-            .signed(
-                &stranger_secret(),
-                "POST",
-                "/api/v1/email-auth/redeem",
-                Some(&redeem_body),
-            )
-            .unwrap();
-
-        let auth_body = serde_json::to_vec(&GitAuthRequest {
-            email: Some("skyler@example.com".into()),
-        })
-        .unwrap();
-        let credential: GitAuthResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    "/api/v1/projects/finitechat-native/git-auth",
-                    Some(&auth_body),
-                )
-                .unwrap(),
-        );
+        let credential = mint_skyler_git_credential(&server);
 
         let dir = tempfile::tempdir().unwrap();
         let remote = format!(
@@ -1329,16 +1259,7 @@ async fn git_ref_event_reconciles_after_restart_boundary() {
             Some(&repo),
         );
 
-        let summary: SiteSummary = json_body(
-            server
-                .signed(
-                    &user_secret(),
-                    "GET",
-                    "/api/v1/sites/finitechat-native-mockup",
-                    None,
-                )
-                .unwrap(),
-        );
+        let summary = project_output_status(&server, "finitechat-native-mockup");
         assert_eq!(summary.active_version, None);
 
         let data_dir = server.data_dir().to_path_buf();
@@ -1382,58 +1303,14 @@ async fn git_push_to_non_deploy_branch_does_not_publish() {
     let server = TestServer::start(&user_pubkey).await;
 
     let task = tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        let created: ProjectApplyResponse = json_body(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
 
-        let login_body = serde_json::to_vec(&EmailLoginRequest {
-            email: "skyler@example.com".into(),
-        })
-        .unwrap();
-        server
-            .agent
-            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
-            .set("Content-Type", "application/json")
-            .send_bytes(&login_body)
-            .unwrap();
-        let token = outbox_email_token(&server.outbox);
-        clear_outbox(&server.outbox);
-        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
-            email: "skyler@example.com".into(),
-            token,
-        })
-        .unwrap();
-        server
-            .signed(
-                &stranger_secret(),
-                "POST",
-                "/api/v1/email-auth/redeem",
-                Some(&redeem_body),
-            )
-            .unwrap();
-
-        let auth_body = serde_json::to_vec(&GitAuthRequest {
-            email: Some("skyler@example.com".into()),
-        })
-        .unwrap();
-        let credential: GitAuthResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    "/api/v1/projects/finitechat-native/git-auth",
-                    Some(&auth_body),
-                )
-                .unwrap(),
-        );
+        let credential = mint_skyler_git_credential(&server);
 
         let dir = tempfile::tempdir().unwrap();
         let remote = format!(
@@ -1496,16 +1373,7 @@ async fn git_push_to_non_deploy_branch_does_not_publish() {
             Some(&repo),
         );
 
-        let summary: SiteSummary = json_body(
-            server
-                .signed(
-                    &user_secret(),
-                    "GET",
-                    "/api/v1/sites/finitechat-native-mockup",
-                    None,
-                )
-                .unwrap(),
-        );
+        let summary = project_output_status(&server, "finitechat-native-mockup");
         assert_eq!(summary.active_version, None);
     });
     task.await.unwrap();
@@ -1517,57 +1385,14 @@ async fn git_push_with_missing_output_path_does_not_publish() {
     let server = TestServer::start(&user_pubkey).await;
 
     let task = tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        let created: ProjectApplyResponse = json_body(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
 
-        let login_body = serde_json::to_vec(&EmailLoginRequest {
-            email: "skyler@example.com".into(),
-        })
-        .unwrap();
-        server
-            .agent
-            .post(&format!("{}/api/v1/email-auth/request", server.api_url))
-            .set("Content-Type", "application/json")
-            .send_bytes(&login_body)
-            .unwrap();
-        let token = outbox_email_token(&server.outbox);
-        clear_outbox(&server.outbox);
-        let redeem_body = serde_json::to_vec(&EmailRedeemRequest {
-            email: "skyler@example.com".into(),
-            token,
-        })
-        .unwrap();
-        server
-            .signed(
-                &stranger_secret(),
-                "POST",
-                "/api/v1/email-auth/redeem",
-                Some(&redeem_body),
-            )
-            .unwrap();
-        let auth_body = serde_json::to_vec(&GitAuthRequest {
-            email: Some("skyler@example.com".into()),
-        })
-        .unwrap();
-        let credential: GitAuthResponse = json_body(
-            server
-                .signed(
-                    &stranger_secret(),
-                    "POST",
-                    "/api/v1/projects/finitechat-native/git-auth",
-                    Some(&auth_body),
-                )
-                .unwrap(),
-        );
+        let credential = mint_skyler_git_credential(&server);
 
         let dir = tempfile::tempdir().unwrap();
         let remote = format!(
@@ -1618,16 +1443,7 @@ async fn git_push_with_missing_output_path_does_not_publish() {
             Some(&repo),
         );
 
-        let summary: SiteSummary = json_body(
-            server
-                .signed(
-                    &user_secret(),
-                    "GET",
-                    "/api/v1/sites/finitechat-native-mockup",
-                    None,
-                )
-                .unwrap(),
-        );
+        let summary = project_output_status(&server, "finitechat-native-mockup");
         assert_eq!(summary.active_version, None);
     });
     task.await.unwrap();
@@ -1640,15 +1456,10 @@ async fn generated_llms_txt_requires_project_output_and_respects_user_file() {
     let port = server.port();
 
     let task = tokio::task::spawn_blocking(move || {
-        let body = serde_json::to_vec(&project_apply_request(false)).unwrap();
-        let created: ProjectApplyResponse = json_body(
+        let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+        let created: ProjectInitResponse = json_body(
             server
-                .signed(
-                    &user_secret(),
-                    "POST",
-                    "/api/v1/projects/apply",
-                    Some(&body),
-                )
+                .signed(&user_secret(), "POST", "/api/v1/projects/init", Some(&body))
                 .unwrap(),
         );
         let credential = mint_skyler_git_credential(&server);

@@ -197,7 +197,7 @@ warm), so idle tenants cost ~0 RAM. Resident app microVMs measured
 Box-local gates (passed 2026-06-09 with a temporary local `--api-url`):
 
 - `/api/v1/healthz` returns `{"ok":true}` through Caddy TLS.
-- project apply → git push → share serves a Project Output through Caddy.
+- project init → git push → share serves a Project Output through Caddy.
 - `https://api.finite.chat/` classifies as the API plane, not a site page
   (dispatch regression gate).
 - `https://git.finite.chat/PROJECT.git` routes to the Git plane; an editor
@@ -214,7 +214,7 @@ they are re-advertised.
 Remaining gates once Cloudflare DNS is live:
 
 - `curl https://api.finite.chat/api/v1/healthz` from anywhere.
-- `fsite project apply` + `fsite auth git` + `git push origin main` from a
+- `fsite project init` + `fsite auth git` + `git push origin main` from a
   real agent workspace (proves NIP-98 URL matching and git smart HTTP through
   the proxy — closes debt ledger item 7).
 - A magic link arrives at a real inbox (after the Resend flip), logs the
@@ -303,24 +303,22 @@ sudo -u finite-sites finitesitesd allow \
 Redeploy examples through Project Repositories, not legacy site-first publish
 commands:
 
-The example fixture grants `skyler@example.com` as the bootstrap editor.
-Replace that email before applying if another External Principal should mint a
-Git Credential and push.
+Grant an External Principal after init if another email should mint a Git
+Credential and push.
 
 ```sh
-fsite project apply \
-  --json examples/project-applies/finitechat-native-mockup.json \
+fsite project init \
   --dry-run \
   --output json \
   --config examples/finitechat-native-mockup/finite.toml
 
-fsite project apply \
-  --json examples/project-applies/finitechat-native-mockup.json \
+fsite project init \
   --output json \
   --config examples/finitechat-native-mockup/finite.toml
 
-fsite email-login skyler@example.com
-fsite email-redeem skyler@example.com TOKEN_FROM_EMAIL
+fsite project grant finitechat-native --email skyler@example.com --send-invite --output json
+fsite auth login skyler@example.com
+fsite auth redeem skyler@example.com TOKEN_FROM_EMAIL
 fsite auth git finitechat-native --email skyler@example.com --store --output json
 ```
 

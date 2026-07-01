@@ -70,7 +70,7 @@ fn email_login_subject() -> &'static str {
 fn email_login_text(email: &str, token: &str) -> String {
     format!(
         "Run this command to verify {email} for Finite Sites publishing:\n\n\
-         fsite email-redeem {email} {token}\n\n\
+         fsite auth redeem {email} {token}\n\n\
          The token works once and expires in 15 minutes. If you did not \
          request it, you can ignore this email.\n"
     )
@@ -107,13 +107,13 @@ fn project_collaborator_invite_text(invite: &ProjectCollaboratorInvite<'_>) -> S
          Agents can inspect the current edit workflow with:\n\n\
          {api_prefix}fsite describe workflow edit-shared-project --output json\n\n\
          To authenticate this machine for {email}, run:\n\n\
-         {api_prefix}fsite email-redeem {email} {token}\n\n\
+         {api_prefix}fsite auth redeem {email} {token}\n\n\
          Then mint a scoped git credential and clone the project:\n\n\
          {api_prefix}fsite auth git {project_slug} --email {email} --store --output json\n\
          git clone {git_remote_url}\n\n\
          Edit the repository, commit your changes, and push the deploy branch.\n\
          The email token works once and expires in 15 minutes. If it expires, run:\n\n\
-         {api_prefix}fsite email-login {email}\n\n",
+         {api_prefix}fsite auth login {email}\n\n",
         project_slug = invite.project_slug,
         role = invite.role,
         email = invite.email,
@@ -474,6 +474,9 @@ mod tests {
             site_name: "finitechat-native-mockup".to_string(),
             site_id: Some("site_1".to_string()),
             site_url: "https://finitechat-native-mockup.finite.chat/".to_string(),
+            status: "claimed_unpublished".to_string(),
+            visibility: "private".to_string(),
+            active_version: None,
             branch: "main".to_string(),
             path: ".".to_string(),
             spa: false,
@@ -488,7 +491,7 @@ mod tests {
             email_login_token: "token123",
             outputs: &outputs,
         });
-        assert!(project.contains("fsite email-redeem skyler@example.com token123"));
+        assert!(project.contains("fsite auth redeem skyler@example.com token123"));
         assert!(project.contains("fsite describe workflow edit-shared-project --output json"));
         assert!(project.contains(
             "fsite auth git finitechat-native --email skyler@example.com --store --output json"

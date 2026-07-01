@@ -71,18 +71,16 @@ pub struct SiteListResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectApplyRequest {
+pub struct ProjectInitRequest {
     pub config: ProjectConfig,
     /// True means validate and return the exact operations without mutating
     /// registry state or writing a git repository.
     #[serde(default)]
     pub dry_run: bool,
-    #[serde(default)]
-    pub collaborators: Vec<ProjectCollaboratorSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectCollaboratorSpec {
+pub struct ProjectGrantRequest {
     /// Milestone 1 supports External Principals by verified email. Native
     /// npub shares use the same role shape once Agent Delegations land.
     pub email: String,
@@ -95,7 +93,7 @@ fn default_project_role() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectApplyResponse {
+pub struct ProjectInitResponse {
     pub dry_run: bool,
     pub project_id: Option<String>,
     pub slug: String,
@@ -103,9 +101,6 @@ pub struct ProjectApplyResponse {
     pub git_remote_url: String,
     pub finite_toml: String,
     pub outputs: Vec<ProjectOutputSummary>,
-    pub collaborators: Vec<ProjectCollaboratorSummary>,
-    #[serde(default)]
-    pub invited_emails: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +110,9 @@ pub struct ProjectOutputSummary {
     pub site_name: String,
     pub site_id: Option<String>,
     pub site_url: String,
+    pub status: String,
+    pub visibility: String,
+    pub active_version: Option<u32>,
     pub branch: String,
     pub path: String,
     pub spa: bool,
@@ -130,16 +128,48 @@ pub struct ProjectCollaboratorSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectCollaboratorRemoveRequest {
+pub struct ProjectGrantResponse {
+    pub project_slug: String,
+    pub collaborator: ProjectCollaboratorSummary,
+    #[serde(default)]
+    pub invited_emails: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRevokeRequest {
     pub email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectCollaboratorRemoveResponse {
+pub struct ProjectRevokeResponse {
     pub project_slug: String,
     pub email: String,
     pub removed: bool,
     pub revoked_git_credentials: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectStatusResponse {
+    pub project_id: String,
+    pub slug: String,
+    pub git_remote_url: String,
+    pub role: String,
+    pub outputs: Vec<ProjectOutputSummary>,
+    pub collaborators: Vec<ProjectCollaboratorSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectListResponse {
+    pub projects: Vec<ProjectListItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectListItem {
+    pub project_id: String,
+    pub slug: String,
+    pub git_remote_url: String,
+    pub role: String,
+    pub outputs: Vec<ProjectOutputSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

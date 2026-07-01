@@ -8,16 +8,48 @@ with exactly these meanings.
 - **Principal**: the human-facing identity permissions attach to. A Principal
   may be represented by an email address during bootstrap and by verified key
   identities once available.
+- **Publishing Principal**: a Principal allowed to create Project
+  Repositories and Project Outputs. A Publishing Principal may be established
+  through email bootstrap or through a native npub path; email is never
+  required for the long-term identity model.
+- **Publishing Bootstrap Invite**: an email-delivered invitation that lets a
+  recipient prove control of an email address and establish a Publishing
+  Principal. Early Finite Sites treats email invites as a growth path for
+  agent publishing; later policy may restrict who can complete the bootstrap
+  without changing the Principal model.
+- **Publishing Limit**: the product meaning of "unlimited" publishing in v0:
+  a Publishing Principal may create up to 100 Project Outputs before an
+  operator or later billing policy changes the limit.
+- **Publishing Revocation**: an operator action that removes a Principal's
+  ability to create new Project Repositories or Project Outputs without
+  necessarily removing existing collaboration or viewing access.
+- **Output Disable**: an operator action that stops one or more Project
+  Outputs from serving while preserving source history and audit context.
+- **Emergency Delete**: a manual operator action reserved for extreme abuse,
+  where preserving source history or names is less important than removing
+  harmful product data.
 - **Native Principal**: a Principal known by npub inside Finite surfaces, such
   as a chat participant. Native shares can target this Principal directly.
 - **External Principal**: a Principal identified by email because they are not
   yet a Finite user. External shares use email verification.
+- **Principal Link**: an explicit, approved relationship between Principals
+  that represent the same user or agent across identity paths. Finite Sites
+  does not infer a Principal Link merely because an External Principal and a
+  Native Principal appear related.
 - **Project Repository**: the editable git history for a project. It may begin
   with data, grow logic around that data, and later produce one or more Project
   Outputs. A Project Repository may exist before any public-facing UI exists.
+- **Project Status**: a control-plane query for one Project Repository. It
+  reports repository existence, Git Remote, Project Outputs, deploy branches
+  and paths, current deploy/version status, and the actor's project permission
+  when known.
+- **Project List**: a control-plane query listing Project Repositories the
+  actor owns or may edit. It is scoped to Project Repositories, not only sites
+  or other served outputs.
 - **Project Slug**: the stable URL-safe identifier for a Project Repository.
-  It is separate from Site Name, though simple projects may default them to
-  the same string.
+  It is separate from Site Name. Simple projects may use the same string for
+  Project Slug and Site Name, but the CLI must make that choice explicit
+  rather than inferring one from the other.
 - **Project Output**: a user-facing artifact produced from a Project
   Repository, such as a Finite Site, Document Output, or PDF Output. Project
   Outputs own serving visibility, sharing, active version pointers, and version
@@ -100,6 +132,11 @@ with exactly these meanings.
 - **Deploy Output**: committed files selected from a Project Repository and
   materialized as a Version. Agents produce Deploy Outputs; Finite Sites
   validates and serves them.
+- **One-Off Publishing**: a simple use of the Project Repository model where a
+  user or agent creates a Project first, writes `finite.toml`, commits only the
+  files they want future editors to start from, and pushes the Deploy Branch.
+  It is not a separate upload surface; the Project Repository remains the
+  source of truth even when the committed tree is only built/static bytes.
 - **Deploy Branch**: the Project Repository branch whose pushed commits create
   new Versions automatically. Pushing to a Deploy Branch updates content but
   does not change visibility or permissions.
@@ -118,9 +155,19 @@ with exactly these meanings.
 - **Project Collaborator**: an email address or key identity granted edit
   rights to a Project Repository. Project collaboration is the default edit
   permission; individual Project Outputs may add narrower rules later.
+- **Project Grant**: a control-plane mutation that gives a Principal edit
+  access to a Project Repository, usually with role `editor`, and may send an
+  invitation with agent-facing instructions.
+- **Project Revoke**: a control-plane mutation that removes a Principal's edit
+  access to a Project Repository and revokes active Git Credentials scoped to
+  that Principal and Project.
 - **Agent Key**: a distinct npub controlled by an agent or device and linked
   to a Principal. Agent Keys authenticate work without making the agent the
   human owner.
+- **Email Bootstrap**: the act of proving control of an email address from a
+  Publishing Bootstrap Invite. A successful Email Bootstrap establishes or
+  resolves an External Principal, links the local Agent Key to that Principal,
+  and enables publishing for that Principal within the Publishing Limit.
 - **Agent Delegation**: a Principal-approved authorization that lets one Agent
   Key act for that Principal on one Project Repository, with bounded
   capabilities.
@@ -135,6 +182,14 @@ with exactly these meanings.
   without out-of-band documentation. It provides structured input/output,
   dry-run validation, and machine-readable descriptions of available commands
   and workflows.
+- **CLI Product Verb**: one of the primary agent-facing actions:
+  `project`, `auth`, or `view`. Product verbs name real product
+  primitives rather than aliases or wrappers around a second surface. If a
+  Product Verb is confusing, the primitive itself must be improved instead of
+  hidden behind a friendlier command.
+- **Auth Guidance Failure**: a command failure that tells an agent which auth
+  step is missing and how to complete it before retrying the original Product
+  Verb.
 - **Project Config**: a project-level configuration file, conventionally
   `finite.toml`, describing Project Outputs such as sites or documents.
 - **Key Challenge**: proof of control for a nostr key. The private key never
@@ -145,7 +200,7 @@ with exactly these meanings.
 - **Publish Grant Cache**: the local registry table deciding whether a User
   Key may create Projects, allocate Project Outputs, and deploy new Versions.
   Operator grants stand in for billing in v1; Core grants become the
-  paid-entitlement path. If no active, unexpired grant exists, project apply
+  paid-entitlement path. If no active, unexpired grant exists, Project Init
   and git deploy fail closed.
 - **Allowlist**: the deployed operator command surface for adding/removing
   `operator` publish grants. De-allowlisting an owner only removes the
@@ -175,8 +230,9 @@ with exactly these meanings.
   Document Markdown for that page. Directory index pages use the route-shaped
   companion URL; the Document Output root uses `/index.md`.
 - **Visibility**: `private` (nobody), `shared` (emails on the Share list),
-  or `public`. Sites are born private. Making a site public requires an
-  explicit confirmation from the human, relayed as `confirm_public`.
+  or `public`. Creating a new Project Output requires explicit Visibility in
+  the CLI request. Making a Project Output public requires an explicit
+  confirmation from the human, relayed as `confirm_public`.
 - **Share**: one `(Project Output, Principal)` row granting view access to a
   served output. Removing it revokes access on the next request, even for live
   cookies.
@@ -184,7 +240,7 @@ with exactly these meanings.
   email. Redeeming it sets a Viewer Cookie on the site's own host.
 - **Viewer Cookie**: an HMAC-signed `(site, email, expiry)` proof, scoped to
   one site host. It proves login; the Share table decides access.
-- **Control Plane**: the NIP-98-authenticated API (project apply, git auth,
+- **Control Plane**: the NIP-98-authenticated API (Project Init, git auth,
   sharing, status). **Serving Plane**: anonymous-or-cookie HTTP on site
   subdomains. One process serves both in v1, split by Host header.
 - **Base Domain**: the wildcard domain under which sites live —

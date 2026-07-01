@@ -104,7 +104,7 @@ mod tests {
     use super::*;
     use crate::event::pubkey_for_secret;
 
-    const URL: &str = "http://127.0.0.1:8787/api/v1/projects/apply";
+    const URL: &str = "http://127.0.0.1:8787/api/v1/projects/init";
     const NOW: u64 = 1_750_000_000;
 
     fn secret(fill: u8) -> [u8; 32] {

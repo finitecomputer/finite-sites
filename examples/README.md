@@ -6,27 +6,25 @@ finite.chat as part of platform validation.
 ## Project Repository seed
 
 `finitechat-native-mockup` is the Project-first validation example. The
-Project Apply JSON lives outside the deploy path so the committed Project
-Repository source only contains the deployable mockup and its required
-`finite.toml`.
+Project init reads the committed `finite.toml`; the Project Repository source
+contains the deployable mockup and its required config.
 
-The fixture grants `skyler@example.com` as the bootstrap editor. Replace that
-email before applying if a different External Principal should clone and push.
+Grant `skyler@example.com` or another External Principal after init if that
+email should clone and push.
 
 ```sh
-fsite project apply \
-  --json examples/project-applies/finitechat-native-mockup.json \
+fsite project init \
   --dry-run \
   --output json \
   --config examples/finitechat-native-mockup/finite.toml
 
-fsite project apply \
-  --json examples/project-applies/finitechat-native-mockup.json \
+fsite project init \
   --output json \
   --config examples/finitechat-native-mockup/finite.toml
 
-fsite email-login skyler@example.com
-fsite email-redeem skyler@example.com TOKEN_FROM_EMAIL
+fsite project grant finitechat-native --email skyler@example.com --send-invite --output json
+fsite auth login skyler@example.com
+fsite auth redeem skyler@example.com TOKEN_FROM_EMAIL
 fsite auth git finitechat-native --email skyler@example.com --output json
 git clone https://git.finite.chat/finitechat-native.git /tmp/finitechat-native
 rsync -a --delete examples/finitechat-native-mockup/ /tmp/finitechat-native/

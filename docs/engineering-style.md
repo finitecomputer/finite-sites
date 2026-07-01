@@ -20,7 +20,7 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   positive path and at least one negative/replay path.
 - Prefer explicit branch structure for validation. Avoid clever `Option` or
   iterator control flow where the code is enforcing safety properties.
-- Mutations that clients may retry (project apply, git ref reconciliation,
+- Mutations that clients may retry (project init, project grant/revoke, git ref reconciliation,
   sharing updates) must be idempotent or reject replays deterministically,
   and have tests for both.
 - Do not use recursion in protocol, storage, serving, or CLI walk code.
@@ -47,7 +47,7 @@ Reference: https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE
   choices, and security-relevant branches.
 - Pass important options explicitly at call sites instead of relying on
   library defaults.
-- Distinguish the control plane from the data plane. Project apply, git
+- Distinguish the control plane from the data plane. Project init, git
   credential minting, git ref reconciliation, sharing, and tokens are control
   plane; blob bytes and site serving are data plane.
 - Treat cache invalidation as a protocol decision. Any derived cache must
@@ -100,9 +100,10 @@ Assertion policy:
 
 - Every registry mutation gets valid and invalid tests.
 - Every idempotent mutation gets success replay and conflicting-replay
-  tests (project apply replay, git ref event replay, sharing update replay).
+  tests (project init replay, project grant/revoke replay, git ref event
+  replay, sharing update replay).
 - Every storage invariant gets a restart test.
-- The full project apply→git push→share→login→view loop has an end-to-end
+- The full project init→project grant→git push→share→login→view loop has an end-to-end
   HTTP test that drives a real server the way the CLI, git, and a browser
   would.
 - Add fuzz/property tests before changing manifest parsing, path decoding,

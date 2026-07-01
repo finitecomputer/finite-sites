@@ -72,8 +72,8 @@ fsite auth git {project_slug} --store --output json
 
 If you are using an editor email, verify this machine for that email if it is not already verified:
 
-fsite email-login YOUR_EDITOR_EMAIL
-fsite email-redeem YOUR_EDITOR_EMAIL TOKEN_FROM_EMAIL
+fsite auth login YOUR_EDITOR_EMAIL
+fsite auth redeem YOUR_EDITOR_EMAIL TOKEN_FROM_EMAIL
 
 Then mint and store a scoped Git Credential:
 

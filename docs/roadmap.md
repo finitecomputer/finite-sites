@@ -77,8 +77,8 @@ implementation stay focused.
   compatibility adapters.
 - Registry has final-shaped Principals, Agent Keys, Projects, Project
   Collaborators, Project Outputs, and Git Credentials.
-- `fsite project apply --json ... --dry-run --output json` creates a Project
-  with one site output.
+- `fsite project init --config finite.toml --dry-run --output json` creates a
+  Project with one site output.
 - `fsite describe workflow publish-static-site --output json` gives agents
   the static-site happy path before they guess at removed direct publish
   commands.
@@ -86,7 +86,7 @@ implementation stay focused.
   `finite.toml` schema and example configs.
 - `fsite auth git PROJECT [--email EMAIL] --store --output json` mints a scoped HTTPS
   Git Credential.
-- `fsite project collaborator remove PROJECT --email EMAIL --output json`
+- `fsite project revoke PROJECT --email EMAIL --output json`
   removes Project edit access and revokes active Git Credentials for that
   Principal.
 - `git clone https://git.finite.chat/PROJECT.git` and `git push origin main`
